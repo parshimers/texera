@@ -84,7 +84,7 @@ export class WorkflowComputingUnitManagingService {
     jvmMemorySize: string,
     shmSize: string,
     uri: string,
-    unitType: "kubernetes" | "local"
+    unitType: WorkflowComputingUnitType
   ): Observable<DashboardWorkflowComputingUnit> {
     const body = { name, cpuLimit, memoryLimit, gpuLimit, jvmMemorySize, shmSize, uri, unitType };
 
@@ -127,6 +127,27 @@ export class WorkflowComputingUnitManagingService {
   }
 
   /**
+   * Create a new Slurm-backed workflow computing unit.
+   *
+   * The scheduler decides where it runs and the job publishes its address once it starts, so
+   * there is no URI to supply here; the JVM-heap and shared-memory knobs are Kubernetes-only.
+   *
+   * @param name The name of the computing unit.
+   * @param cpuLimit The cpu resource limit for the computing unit.
+   * @param memoryLimit The memory resource limit for the computing unit.
+   * @param gpuLimit The gpu resource limit for the computing unit.
+   * @returns An Observable of the created WorkflowComputingUnit.
+   */
+  public createSlurmComputingUnit(
+    name: string,
+    cpuLimit: string,
+    memoryLimit: string,
+    gpuLimit: string
+  ): Observable<DashboardWorkflowComputingUnit> {
+    return this.createComputingUnit(name, cpuLimit, memoryLimit, gpuLimit, "NaN", "NaN", "", "slurm");
+  }
+
+  /**
    * Terminate a computing unit (pod) by its URI.
    * @returns An Observable of the server response.
    * @param cuid
@@ -137,18 +158,25 @@ export class WorkflowComputingUnitManagingService {
 
   /**
    * Fetch the list of available CPU and memory limit options.
+   *
+   * The options depend on the backend that will run the unit -- a Slurm unit is sized in whole
+   * nodes, a pod in millicores -- so the type is passed through. Omitting it keeps the server's
+   * own default.
+   *
+   * @param unitType The computing unit type whose option lists are wanted.
    * @returns An Observable containing both CPU and memory limit options.
    */
-  public getComputingUnitLimitOptions(): Observable<{
+  public getComputingUnitLimitOptions(unitType?: string): Observable<{
     cpuLimitOptions: string[];
     memoryLimitOptions: string[];
     gpuLimitOptions: string[];
   }> {
+    const query = unitType ? `?type=${encodeURIComponent(unitType)}` : "";
     return this.http.get<{
       cpuLimitOptions: string[];
       memoryLimitOptions: string[];
       gpuLimitOptions: string[];
-    }>(`${AppSettings.getApiEndpoint()}/${COMPUTING_UNIT_BASE_URL}/limits`);
+    }>(`${AppSettings.getApiEndpoint()}/${COMPUTING_UNIT_BASE_URL}/limits${query}`);
   }
 
   /**

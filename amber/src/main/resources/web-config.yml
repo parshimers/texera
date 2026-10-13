@@ -21,10 +21,19 @@ server:
   applicationContextPath: /
   applicationConnectors:
     - type: http
-      port: 8080
+      # Overridable so several instances of the stack can run side by side on one
+      # host -- a per-user JupyterLab deployment gives each user their own set of
+      # services, so no port can be fixed. Defaults to the value every other
+      # deployment uses.
+      port: ${TEXERA_WEB_PORT:-8080}
+      # Bound to all interfaces by default, as every deployment before this one was.
+      # A per-user deployment sets it to loopback: the only thing that should reach a
+      # user's services is their own gateway, and on a shared node "all interfaces"
+      # means every other user on that node.
+      bindHost: ${TEXERA_BIND_ADDRESS:-0.0.0.0}
   adminConnectors:
     - type: http
-      port: 8081
+      port: ${TEXERA_WEB_ADMIN_PORT:-8081}
   requestLog:
     type: classic
     timeZone: UTC

@@ -31,7 +31,7 @@ import { ExecutionState } from "../../types/execute-workflow.interface";
 import { HeatmapView } from "../../service/heatmap/heatmap-scoring";
 import { WorkflowWebsocketService } from "../../service/workflow-websocket/workflow-websocket.service";
 import { WorkflowResultExportService } from "../../service/workflow-result-export/workflow-result-export.service";
-import { catchError, debounceTime, switchMap, tap } from "rxjs/operators";
+import { catchError, debounceTime, filter, switchMap, take, tap, timeout } from "rxjs/operators";
 import { UntilDestroy, untilDestroyed } from "@ngneat/until-destroy";
 import { WorkflowUtilService } from "../../service/workflow-graph/util/workflow-util.service";
 import { WorkflowVersionService } from "../../../dashboard/service/user/workflow-version/workflow-version.service";
@@ -47,6 +47,7 @@ import { ShareAccessComponent } from "src/app/dashboard/component/user/share-acc
 import { PanelService } from "../../service/panel/panel.service";
 import { USER_WORKFLOW } from "../../../app-routing.constant";
 import { ComputingUnitStatusService } from "../../../common/service/computing-unit/computing-unit-status/computing-unit-status.service";
+import { extractErrorMessage } from "../../../common/util/error";
 import { ComputingUnitState } from "../../../common/type/computing-unit-connection.interface";
 import { ComputingUnitSelectionComponent } from "../power-button/computing-unit-selection.component";
 import { GuiConfigService } from "../../../common/service/gui-config.service";
@@ -165,6 +166,14 @@ export class MenuComponent implements OnInit, OnDestroy {
   public computingUnitStatus: ComputingUnitState = ComputingUnitState.NoComputingUnit;
 
   @ViewChild(ComputingUnitSelectionComponent) computingUnitSelectionComponent!: ComputingUnitSelectionComponent;
+
+  // How long to wait for a freshly provisioned unit to start before giving up. A Slurm job
+  // waits for the scheduler, not for a container image, so this is minutes rather than
+  // seconds; when it runs out the job is usually still queued, which the message says.
+  private static readonly PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
+
+  // Guards against a second Run while the first is still waiting for the scheduler.
+  private provisioning = false;
 
   constructor(
     public executeWorkflowService: ExecuteWorkflowService,
@@ -801,23 +810,68 @@ export class MenuComponent implements OnInit, OnDestroy {
       return;
     }
 
-    // If computing unit manager is enabled and no computing unit is selected
+    // Pressing Run without a unit means "get me one and run": the deployment knows what
+    // shape a unit has, so there is nothing to ask the user first.
     if (this.computingUnitStatus === ComputingUnitState.NoComputingUnit) {
-      // Create a default name based on the workflow name
-      const defaultName = this.currentWorkflowName
-        ? `${this.currentWorkflowName}'s Computing Unit`
-        : "New Computing Unit";
-
-      // Show the modal in the ComputingUnitSelectionComponent, seeding the name field
-      this.computingUnitSelectionComponent.showAddComputeUnitModalVisible(defaultName);
+      this.provisionThenRun();
       return;
     }
 
     // Regular workflow execution - already connected
+    this.executeWorkflow();
+  }
+
+  /**
+   * Execute against the unit that is already connected. Extracted so the provision-then-run
+   * path can reach it once the unit reports Running.
+   */
+  private executeWorkflow(): void {
     this.executeWorkflowService.executeWorkflowWithEmailNotification(
       this.currentExecutionName || "Untitled Execution",
       this.config.env.workflowEmailNotificationEnabled
     );
+  }
+
+  /**
+   * Provision a computing unit, wait for the scheduler to start it, then execute.
+   */
+  private provisionThenRun(): void {
+    if (this.provisioning) {
+      return;
+    }
+    this.provisioning = true;
+
+    const defaultName = this.currentWorkflowName
+      ? `${this.currentWorkflowName}'s Computing Unit`
+      : "New Computing Unit";
+
+    this.notificationService.info("Requesting compute from the cluster...");
+
+    this.computingUnitSelectionComponent
+      .provisionComputingUnit(defaultName)
+      .pipe(
+        switchMap(() =>
+          this.computingUnitStatusService.getStatus().pipe(
+            filter(status => status === ComputingUnitState.Running),
+            take(1),
+            timeout(MenuComponent.PROVISION_TIMEOUT_MS)
+          )
+        ),
+        untilDestroyed(this)
+      )
+      .subscribe({
+        next: () => {
+          this.provisioning = false;
+          this.executeWorkflow();
+        },
+        error: (err: unknown) => {
+          this.provisioning = false;
+          this.notificationService.error(
+            `Could not get compute from the cluster: ${extractErrorMessage(err)}. ` +
+              "If the job is still queued, press Run again once it starts."
+          );
+        },
+      });
   }
 
   protected readonly Privilege = Privilege;

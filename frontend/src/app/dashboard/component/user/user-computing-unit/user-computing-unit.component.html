@@ -24,7 +24,7 @@
       <button
         nz-button
         class="create-btn"
-        (click)="showAddComputeUnitModalVisible()"
+        (click)="addComputingUnit()"
         title="Create Computing Unit">
         <i
           nz-icon
@@ -53,6 +53,3 @@
 </div>
 
 <!-- Panel for creating the computing unit -->
-<texera-computing-unit-create-modal
-  [(visible)]="addComputeUnitModalVisible"
-  (unitCreated)="onComputingUnitCreated()"></texera-computing-unit-create-modal>

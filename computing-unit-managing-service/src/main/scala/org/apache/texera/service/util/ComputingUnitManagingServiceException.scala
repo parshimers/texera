@@ -40,6 +40,13 @@ final case class InsufficientComputingUnitQuota(maxNumberOfComputingUnit: Int)
       s"You may only have $maxNumberOfComputingUnit computing-unit(s) running at the same time"
     )
 
+// Submitting the unit's batch job to Slurm failed. Carries the scheduler's own words:
+// sbatch's diagnostics ("Invalid account", "Invalid partition") are what a user needs.
+final case class SlurmSubmissionFailed(cuid: Int, reason: String)
+    extends ComputingUnitManagingServiceException(
+      s"Failed to submit computing unit $cuid to Slurm: $reason"
+    )
+
 // default exception fallback
 final case class InternalError(
     override val getMessage: String =

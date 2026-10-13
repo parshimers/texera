@@ -19,7 +19,15 @@ server:
   applicationContextPath: /
   applicationConnectors:
     - type: http
-      port: 8085
+      # Overridable because a Slurm computing unit shares its node with other computing
+      # units, so the port cannot be fixed; the batch script picks a free one and passes it
+      # in. Defaults to 8085, which is what every other deployment uses.
+      port: ${COMPUTING_UNIT_MASTER_PORT:-8085}
+      # Bound to all interfaces by default, as every deployment before this one was.
+      # A per-user deployment sets it to loopback: the only thing that should reach a
+      # user's services is their own gateway, and on a shared node "all interfaces"
+      # means every other user on that node.
+      bindHost: ${TEXERA_BIND_ADDRESS:-0.0.0.0}
 
   # Disable the admin connectors if you don't need an admin interface
   adminConnectors: []

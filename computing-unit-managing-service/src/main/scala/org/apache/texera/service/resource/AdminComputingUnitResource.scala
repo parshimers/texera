@@ -74,17 +74,16 @@ class AdminComputingUnitResource {
         .toList
 
     val podPhases = ComputingUnitHelpers.podPhasesFor(activeUnits)
+    val slurmJobs = ComputingUnitHelpers.slurmJobsFor(activeUnits)
 
     // Wrap only the reconcile write, not the Kubernetes round trips above: keeps a pooled
     // connection from being held open across them, while the transaction makes the batchUpdate
     // all-or-nothing (autocommit would retire only some vanished units on a mid-batch failure).
 
     val liveUnits = SqlServer.withTransaction(ctx) { txCtx =>
-      ComputingUnitHelpers.reconcileVanishedKubernetesUnits(
-        new WorkflowComputingUnitDao(txCtx.configuration()),
-        activeUnits,
-        podPhases
-      )
+      val dao = new WorkflowComputingUnitDao(txCtx.configuration())
+      ComputingUnitHelpers.recordSlurmAddresses(dao, activeUnits, slurmJobs.getOrElse(Map.empty))
+      ComputingUnitHelpers.reconcileVanishedUnits(dao, activeUnits, podPhases, slurmJobs)
     }
 
     // Metrics only for survivors, so fetch after reconciliation.
@@ -100,7 +99,8 @@ class AdminComputingUnitResource {
         accessPrivilege = PrivilegeEnum.WRITE,
         ownerInfo = ownerInfo,
         podPhases = podPhases,
-        podMetrics = podMetrics
+        podMetrics = podMetrics,
+        slurmJobs = slurmJobs.getOrElse(Map.empty)
       )
     }
   }

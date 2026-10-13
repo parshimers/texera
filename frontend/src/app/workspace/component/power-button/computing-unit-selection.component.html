@@ -206,7 +206,7 @@
         nz-menu-divider></li>
       <li
         nz-menu-item
-        (click)="showAddComputeUnitModalVisible()">
+        (click)="addComputingUnit()">
         <div class="create-computing-unit">
           <i
             nz-icon
@@ -217,11 +217,6 @@
     </ul>
   </nz-dropdown-menu>
 </div>
-
-<!-- Panel for creating the computing unit -->
-<texera-computing-unit-create-modal
-  [(visible)]="addComputeUnitModalVisible"
-  (unitCreated)="onComputingUnitCreated($event)"></texera-computing-unit-create-modal>
 
 <ng-template #metricsTemplate>
   <div class="resource-metrics">

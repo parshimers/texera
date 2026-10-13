@@ -17,8 +17,9 @@
  * under the License.
  */
 
-import { ChangeDetectorRef, Component, OnInit, NgZone, ViewChild } from "@angular/core";
-import { take } from "rxjs/operators";
+import { ChangeDetectorRef, Component, OnInit, NgZone } from "@angular/core";
+import { take, tap } from "rxjs/operators";
+import { Observable } from "rxjs";
 import { WorkflowComputingUnitManagingService } from "../../../common/service/computing-unit/workflow-computing-unit/workflow-computing-unit-managing.service";
 import { DashboardWorkflowComputingUnit } from "../../../common/type/workflow-computing-unit";
 import { NotificationService } from "../../../common/service/notification/notification.service";
@@ -72,7 +73,6 @@ import { NzInputDirective } from "ng-zorro-antd/input";
 import { NzSelectComponent, NzOptionComponent } from "ng-zorro-antd/select";
 import { FormsModule } from "@angular/forms";
 import { NzCollapseComponent, NzCollapsePanelComponent } from "ng-zorro-antd/collapse";
-import { ComputingUnitCreateModalComponent } from "../../../common/component/computing-unit-create-modal/computing-unit-create-modal.component";
 
 type PveUserPackageRow = {
   name: string;
@@ -127,7 +127,6 @@ type PveDraft = {
     NzCollapseComponent,
     NzCollapsePanelComponent,
     DecimalPipe,
-    ComputingUnitCreateModalComponent,
   ],
 })
 export class ComputingUnitSelectionComponent implements OnInit {
@@ -152,12 +151,6 @@ export class ComputingUnitSelectionComponent implements OnInit {
   lastSelectedCuid?: number;
   selectedComputingUnit: DashboardWorkflowComputingUnit | null = null;
   allComputingUnits: DashboardWorkflowComputingUnit[] = [];
-
-  // visibility of the shared create-computing-unit modal
-  addComputeUnitModalVisible = false;
-
-  @ViewChild(ComputingUnitCreateModalComponent)
-  private computingUnitCreateModal?: ComputingUnitCreateModalComponent;
 
   // variables for renaming a computing unit
   editingNameOfUnit: number | null = null;
@@ -340,11 +333,26 @@ export class ComputingUnitSelectionComponent implements OnInit {
     return this.gpuOptions.length > 1 || (this.gpuOptions.length === 1 && this.gpuOptions[0] !== "0");
   }
 
-  showAddComputeUnitModalVisible(defaultName?: string): void {
-    if (defaultName !== undefined && this.computingUnitCreateModal) {
-      this.computingUnitCreateModal.newComputingUnitName = defaultName;
-    }
-    this.addComputeUnitModalVisible = true;
+  /**
+   * Provision a unit and select it. The shape is the deployment's business, so there is
+   * nothing to ask: this is a button, not a dialog.
+   */
+  addComputingUnit(): void {
+    this.provisionComputingUnit()
+      .pipe(untilDestroyed(this))
+      .subscribe({
+        error: (err: unknown) =>
+          this.notificationService.error(`Could not get compute from the cluster: ${extractErrorMessage(err)}`),
+      });
+  }
+
+  /**
+   * The observable form, for callers that need to wait for the unit (the Run button).
+   */
+  provisionComputingUnit(name?: string): Observable<DashboardWorkflowComputingUnit> {
+    return this.computingUnitActionsService
+      .provision(name ?? "Computing Unit")
+      .pipe(tap(unit => this.onComputingUnitCreated(unit)));
   }
 
   onComputingUnitCreated(unit: DashboardWorkflowComputingUnit): void {

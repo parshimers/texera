@@ -320,8 +320,8 @@ interface JvmMemorySliderConfig {
   selectedJvmMemorySize: string;
 }
 
-export function buildLocalComputingUnitUri(location: { protocol: string; hostname: string; port: string }): string {
-  return `${location.protocol}//${location.hostname}${location.port ? `:${location.port}` : ""}/wsapi`;
+export function buildLocalComputingUnitUri(baseUrl: string): string {
+  return new URL("wsapi", baseUrl).toString();
 }
 
 export const unitTypeMessageTemplate = {
@@ -334,6 +334,19 @@ export const unitTypeMessageTemplate = {
     terminateSuccess: "Disconnected from the local computing unit",
     terminateFailure: "Failed to disconnect from the local computing unit",
     terminateTooltip: "Disconnect from this computing unit",
+  },
+  slurm: {
+    createTitle: "Create Slurm Computing Unit",
+    terminateTitle: "Terminate Slurm Computing Unit",
+    terminateWarning:
+      "<p style='color: #ff4d4f;'><strong>Warning:</strong> All execution results in this computing unit will be lost, and its Slurm job will be cancelled.</p>",
+    // A Slurm unit is queued, not started: saying "created" would promise something the
+    // scheduler has not agreed to yet.
+    createSuccess: "Submitted the Slurm computing unit; it becomes ready once the job starts",
+    createFailure: "Failed to submit the Slurm computing unit",
+    terminateSuccess: "Terminated Slurm computing unit",
+    terminateFailure: "Failed to terminate Slurm computing unit",
+    terminateTooltip: "Terminate this computing unit and release its Slurm allocation",
   },
   kubernetes: {
     createTitle: "Create Computing Unit",

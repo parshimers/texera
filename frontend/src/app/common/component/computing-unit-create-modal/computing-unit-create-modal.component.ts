@@ -127,7 +127,7 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
 
   ngOnInit(): void {
     // Fetch available computing unit types
-    this.localComputingUnitUri = buildLocalComputingUnitUri(window.location);
+    this.localComputingUnitUri = buildLocalComputingUnitUri(document.baseURI);
     this.newComputingUnitName = "My Computing Unit";
     this.computingUnitService
       .getComputingUnitTypes()

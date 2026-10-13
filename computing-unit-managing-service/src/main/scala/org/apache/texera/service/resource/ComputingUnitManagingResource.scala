@@ -38,6 +38,7 @@ import org.apache.texera.common.config.{
   ComputingUnitConfig,
   EnvironmentalVariable,
   KubernetesConfig,
+  SlurmConfig,
   StorageConfig
 }
 import org.apache.texera.dao.SqlServer
@@ -58,7 +59,9 @@ import org.apache.texera.service.util.{
   ComputingUnitHelpers,
   ComputingUnitManagingServiceException,
   InsufficientComputingUnitQuota,
-  KubernetesClient
+  KubernetesClient,
+  SlurmClient,
+  SlurmJobInfo
 }
 import org.jooq.{DSLContext, EnumType}
 import play.api.libs.json._
@@ -66,6 +69,7 @@ import play.api.libs.json._
 import java.sql.Timestamp
 import scala.annotation.unused
 import scala.jdk.CollectionConverters.CollectionHasAsScala
+import scala.util.Try
 
 object ComputingUnitManagingResource {
   private def context: DSLContext =
@@ -196,6 +200,7 @@ class ComputingUnitManagingResource {
     val allTypes = WorkflowComputingUnitTypeEnum.values().map(_.getLiteral).toList
     allTypes.filter {
       case "local"      => ComputingUnitConfig.localComputingUnitEnabled
+      case "slurm"      => SlurmConfig.slurmComputingUnitEnabled
       case "kubernetes" => KubernetesConfig.kubernetesComputingUnitEnabled
       case _            => false // Any unknown types are disabled by default
     }
@@ -218,6 +223,24 @@ class ComputingUnitManagingResource {
           podLimits("memory"),
           gpuValue
         )
+
+      // Slurm asked for these at submission time and recorded them on the unit; there is no
+      // live object to interrogate the way there is for a pod.
+      case WorkflowComputingUnitTypeEnum.slurm =>
+        val resource: JsObject = Option(unit.getResource)
+          .filter(_.nonEmpty)
+          .flatMap(raw => Try(Json.parse(raw).as[JsObject]).toOption)
+          .getOrElse(Json.obj())
+        def field(name: String): String =
+          (resource \ name).asOpt[String].filter(_.nonEmpty).getOrElse("NaN")
+        WorkflowComputingUnitResourceLimit(
+          field("cpuLimit"),
+          field("memoryLimit"),
+          field("gpuLimit")
+        )
+
+      case _ =>
+        WorkflowComputingUnitResourceLimit("NaN", "NaN", "NaN")
     }
   }
 
@@ -226,9 +249,21 @@ class ComputingUnitManagingResource {
   @Produces(Array(MediaType.APPLICATION_JSON))
   @Path("/limits")
   def getComputingUnitLimitOptions(
+      @QueryParam("type") unitType: String,
       @Auth @unused user: SessionUser
   ): ComputingUnitLimitOptionsResponse = {
-    ComputingUnitLimitOptionsResponse(cpuLimitOptions, memoryLimitOptions, gpuLimitOptions)
+    // The option lists are per backend: a Slurm unit is sized in whole nodes, a pod in
+    // millicores. Defaults to kubernetes so an older frontend keeps its previous answer.
+    Option(unitType).map(_.trim).filter(_.nonEmpty).getOrElse("kubernetes") match {
+      case "slurm" =>
+        ComputingUnitLimitOptionsResponse(
+          SlurmConfig.cpuLimitOptions,
+          SlurmConfig.memoryLimitOptions,
+          SlurmConfig.gpuLimitOptions
+        )
+      case _ =>
+        ComputingUnitLimitOptionsResponse(cpuLimitOptions, memoryLimitOptions, gpuLimitOptions)
+    }
   }
 
   @GET
@@ -325,6 +360,25 @@ class ComputingUnitManagingResource {
               s"total memory limit (${param.memoryLimit})."
           )
 
+      // Slurm-specific checks. Whole-node quantities, so the options come from slurm.conf
+      // rather than from the Kubernetes lists.
+      case WorkflowComputingUnitTypeEnum.slurm =>
+        if (!SlurmConfig.cpuLimitOptions.contains(param.cpuLimit))
+          throw new ForbiddenException(
+            s"CPU quantity '${param.cpuLimit}' is not allowed. " +
+              s"Valid options: ${SlurmConfig.cpuLimitOptions.mkString(", ")}"
+          )
+        if (!SlurmConfig.memoryLimitOptions.contains(param.memoryLimit))
+          throw new ForbiddenException(
+            s"Memory quantity '${param.memoryLimit}' is not allowed. " +
+              s"Valid options: ${SlurmConfig.memoryLimitOptions.mkString(", ")}"
+          )
+        if (!SlurmConfig.gpuLimitOptions.contains(param.gpuLimit))
+          throw new ForbiddenException(
+            s"GPU quantity '${param.gpuLimit}' is not allowed. " +
+              s"Valid options: ${SlurmConfig.gpuLimitOptions.mkString(", ")}"
+          )
+
       // Local-specific checks
       case WorkflowComputingUnitTypeEnum.local =>
         if (param.uri.forall(_.trim.isEmpty))
@@ -349,6 +403,15 @@ class ComputingUnitManagingResource {
         throw InsufficientComputingUnitQuota(maxNumOfRunningComputingUnitsPerUser)
       }
 
+      // Slurm has its own per-user ceiling: a cluster's idea of "too many" is not a
+      // namespace's, and the two backends are configured independently.
+      if (
+        cuType == WorkflowComputingUnitTypeEnum.slurm &&
+        units.size >= SlurmConfig.maxNumOfRunningComputingUnitsPerUser
+      ) {
+        throw InsufficientComputingUnitQuota(SlurmConfig.maxNumOfRunningComputingUnitsPerUser)
+      }
+
       val resourceJson: String = cuType match {
         // ── Kubernetes CU ───────────────────────────────────────
         case WorkflowComputingUnitTypeEnum.kubernetes =>
@@ -360,6 +423,21 @@ class ComputingUnitManagingResource {
               "jvmMemorySize" -> param.jvmMemorySize,
               "shmSize" -> param.shmSize,
               "nodeAddresses" -> Json.arr() // filled in later
+            )
+          )
+
+        // ── Slurm CU ─────────────────────────────────────
+        // nodeAddresses is filled in once the job starts and reports where it landed; the
+        // JVM-heap and shared-memory knobs are Kubernetes-only.
+        case WorkflowComputingUnitTypeEnum.slurm =>
+          Json.stringify(
+            Json.obj(
+              "cpuLimit" -> param.cpuLimit,
+              "memoryLimit" -> param.memoryLimit,
+              "gpuLimit" -> param.gpuLimit,
+              "jvmMemorySize" -> "NaN",
+              "shmSize" -> "NaN",
+              "nodeAddresses" -> Json.arr()
             )
           )
 
@@ -443,6 +521,27 @@ class ComputingUnitManagingResource {
         }
       }
 
+      if (cuType == WorkflowComputingUnitTypeEnum.slurm && insertedUnit != null) {
+        // Submit first, record the job id second: if sbatch fails the transaction rolls back
+        // and no half-created unit is left behind. The address is not known yet -- the job
+        // publishes it when it starts, and a later listing copies it into `uri`.
+        val jobId = SlurmClient.submitJob(
+          cuid,
+          param.cpuLimit,
+          param.memoryLimit,
+          param.gpuLimit,
+          computingUnitEnvironmentVariables ++ Map(
+            EnvironmentalVariable.ENV_USER_JWT_TOKEN -> userToken
+          )
+        )
+
+        val updatedResource: JsObject =
+          Json.parse(insertedUnit.getResource).as[JsObject] ++ Json.obj("slurmJobId" -> jobId)
+
+        insertedUnit.setResource(Json.stringify(updatedResource))
+        wcDao.update(insertedUnit)
+      }
+
       DashboardWorkflowComputingUnit(
         insertedUnit,
         ComputingUnitHelpers.getComputingUnitStatus(insertedUnit).toString,
@@ -511,14 +610,24 @@ class ComputingUnitManagingResource {
       }.toMap
       val candidateUnits = unitsWithPrivilege.map { case (unit, _) => unit }
 
-      // Pod phases decide which Kubernetes units are still alive.
+      // Pod phases decide which Kubernetes units are still alive; squeue does the same for
+      // Slurm units. Both are fetched once per listing rather than once per unit.
       val podPhases = ComputingUnitHelpers.podPhasesFor(candidateUnits)
+      val slurmJobs = ComputingUnitHelpers.slurmJobsFor(candidateUnits)
+
+      // A job that has started since the last listing has published its address by now.
+      ComputingUnitHelpers.recordSlurmAddresses(
+        computingUnitDao,
+        candidateUnits,
+        slurmJobs.getOrElse(Map.empty)
+      )
 
       val liveUnits =
-        ComputingUnitHelpers.reconcileVanishedKubernetesUnits(
+        ComputingUnitHelpers.reconcileVanishedUnits(
           computingUnitDao,
           candidateUnits,
-          podPhases
+          podPhases,
+          slurmJobs
         )
 
       // Metrics only for survivors, so fetch after reconciliation.
@@ -534,7 +643,8 @@ class ComputingUnitManagingResource {
           accessPrivilege = privilegeByCuid(unit.getCuid),
           ownerInfo = ownerInfoMap,
           podPhases = podPhases,
-          podMetrics = podMetrics
+          podMetrics = podMetrics,
+          slurmJobs = slurmJobs.getOrElse(Map.empty)
         )
       }
     }
@@ -556,6 +666,12 @@ class ComputingUnitManagingResource {
   ): DashboardWorkflowComputingUnit = {
 
     val unit = getComputingUnitByCuid(context, cuid)
+    // The power button polls this endpoint while a unit is Pending, so it is also where a
+    // Slurm unit's address is picked up if the job started since the last call.
+    ComputingUnitHelpers.recordSlurmAddress(
+      new WorkflowComputingUnitDao(context.configuration()),
+      unit
+    )
     val userDao = new UserDao(context.configuration())
     val ownerUser = Option(userDao.fetchOneByUid(unit.getUid))
     val ownerAvatar: String =
@@ -619,6 +735,11 @@ class ComputingUnitManagingResource {
       // if the computing unit is kubernetes pod, then kill the pod
       if (unit.getType == WorkflowComputingUnitTypeEnum.kubernetes) {
         KubernetesClient.deletePod(cuid)
+      }
+
+      // a Slurm unit is a batch job; deleting the unit is what cancels it
+      if (unit.getType == WorkflowComputingUnitTypeEnum.slurm) {
+        SlurmClient.cancelJob(cuid)
       }
 
       unit.setTerminateTime(new Timestamp(System.currentTimeMillis()))

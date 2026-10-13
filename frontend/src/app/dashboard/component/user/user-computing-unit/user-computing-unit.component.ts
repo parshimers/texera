@@ -23,6 +23,7 @@ import { DashboardEntry } from "../../../type/dashboard-entry";
 import { DashboardWorkflowComputingUnit } from "../../../../common/type/workflow-computing-unit";
 import { NotificationService } from "../../../../common/service/notification/notification.service";
 import { UntilDestroy, untilDestroyed } from "@ngneat/until-destroy";
+import { extractErrorMessage } from "../../../../common/util/error";
 import { UserService } from "../../../../common/service/user/user.service";
 import { ComputingUnitActionsService } from "../../../../common/service/computing-unit/computing-unit-actions/computing-unit-actions.service";
 import { interval } from "rxjs";
@@ -35,7 +36,6 @@ import { NzIconDirective } from "ng-zorro-antd/icon";
 import { ɵɵCdkVirtualScrollViewport, ɵɵCdkFixedSizeVirtualScroll, ɵɵCdkVirtualForOf } from "@angular/cdk/overlay";
 import { NzListComponent } from "ng-zorro-antd/list";
 import { UserComputingUnitListItemComponent } from "./user-computing-unit-list-item/user-computing-unit-list-item.component";
-import { ComputingUnitCreateModalComponent } from "../../../../common/component/computing-unit-create-modal/computing-unit-create-modal.component";
 
 @UntilDestroy()
 @Component({
@@ -54,7 +54,6 @@ import { ComputingUnitCreateModalComponent } from "../../../../common/component/
     NzListComponent,
     ɵɵCdkVirtualForOf,
     UserComputingUnitListItemComponent,
-    ComputingUnitCreateModalComponent,
   ],
 })
 export class UserComputingUnitComponent implements OnInit {
@@ -65,7 +64,6 @@ export class UserComputingUnitComponent implements OnInit {
   allComputingUnits: DashboardWorkflowComputingUnit[] = [];
 
   // visibility of the shared create-computing-unit modal
-  addComputeUnitModalVisible = false;
 
   constructor(
     private notificationService: NotificationService,
@@ -109,8 +107,22 @@ export class UserComputingUnitComponent implements OnInit {
     this.computingUnitActionsService.confirmAndTerminate(cuid, unit);
   }
 
-  showAddComputeUnitModalVisible(): void {
-    this.addComputeUnitModalVisible = true;
+  /**
+   * Provision a unit of the shape this deployment configures. No dialog: the user picks
+   * nothing, so there is nothing to fill in.
+   */
+  addComputingUnit(): void {
+    this.computingUnitActionsService
+      .provision("Computing Unit")
+      .pipe(untilDestroyed(this))
+      .subscribe({
+        next: () => {
+          this.notificationService.success("Requested a computing unit");
+          this.onComputingUnitCreated();
+        },
+        error: (err: unknown) =>
+          this.notificationService.error(`Could not get compute from the cluster: ${extractErrorMessage(err)}`),
+      });
   }
 
   onComputingUnitCreated(): void {
