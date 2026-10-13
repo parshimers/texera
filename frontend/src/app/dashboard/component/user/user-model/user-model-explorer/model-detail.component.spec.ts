@@ -24,12 +24,11 @@ import { of, Subject, throwError } from "rxjs";
 import { MarkdownService } from "ngx-markdown";
 import { NzModalService } from "ng-zorro-antd/modal";
 import { NgModel } from "@angular/forms";
-import { NzResizableDirective } from "ng-zorro-antd/resizable";
 import { By } from "@angular/platform-browser";
 import { commonTestImports, commonTestProviders } from "../../../../../common/testing/test-utils";
 import { NotificationService } from "../../../../../common/service/notification/notification.service";
 import { UserService } from "../../../../../common/service/user/user.service";
-import { StubUserService } from "../../../../../common/service/user/stub-user.service";
+import { MOCK_USER_ID, StubUserService } from "../../../../../common/service/user/stub-user.service";
 import { MODEL_FORMATS, MODEL_FRAMEWORKS, ModelService } from "../../../../service/user/model/model.service";
 import { DownloadService } from "../../../../service/user/download/download.service";
 import { AdminSettingsService } from "../../../../service/admin/settings/admin-settings.service";
@@ -41,6 +40,7 @@ import { MarkdownDescriptionComponent } from "../../markdown-description/markdow
 import { DatasetFileNode } from "../../../../../common/type/datasetVersionFileTree";
 import { ModelVersion } from "../../../../../common/type/model";
 import { Role, User } from "../../../../../common/type/user";
+import { ActionType, EntityType, HubService } from "../../../../../hub/service/hub.service";
 import { ModelDetailComponent } from "./model-detail.component";
 
 const MID = 5;
@@ -72,6 +72,7 @@ describe("ModelDetailComponent", () => {
   let multipartUploadService: Record<string, ReturnType<typeof vi.fn>>;
   let stagedFileService: Record<string, ReturnType<typeof vi.fn>>;
   let adminSettingsService: Record<string, ReturnType<typeof vi.fn>>;
+  let hubService: Record<string, ReturnType<typeof vi.fn>>;
 
   const dashboardModel = (overrides: Partial<Record<string, unknown>> = {}) => ({
     isOwner: true,
@@ -131,6 +132,12 @@ describe("ModelDetailComponent", () => {
     };
     // Every model upload key is absent in this stub, so the component keeps its own defaults.
     adminSettingsService = { getPublicSetting: vi.fn(() => of("")) };
+    hubService = {
+      postView: vi.fn(() => of(7)),
+      getCounts: vi.fn(() => of([{ entityId: MID, entityType: EntityType.Model, counts: { like: 3 } }])),
+      isLiked: vi.fn(() => of([{ entityId: MID, entityType: EntityType.Model, isLiked: true }])),
+      toggleLike: vi.fn(() => of({ liked: false, likeCount: 2 })),
+    };
 
     TestBed.configureTestingModule({
       imports: [ModelDetailComponent, NoopAnimationsModule, ...commonTestImports],
@@ -145,6 +152,7 @@ describe("ModelDetailComponent", () => {
         { provide: MultipartUploadService, useValue: multipartUploadService },
         { provide: StagedFileService, useValue: stagedFileService },
         { provide: AdminSettingsService, useValue: adminSettingsService },
+        { provide: HubService, useValue: hubService },
         ...commonTestProviders,
       ],
     });
@@ -186,9 +194,6 @@ describe("ModelDetailComponent", () => {
     return el as unknown as E;
   };
 
-  // The sider coalesces resize events into one write per animation frame.
-  const nextFrame = (): Promise<void> => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-
   // ─── loading the model ──────────────────────────────────────────────────────
 
   it("reads the mid off the route as a number and loads the model", () => {
@@ -206,6 +211,45 @@ describe("ModelDetailComponent", () => {
     expect(component.ownerEmail).toBe(OWNER);
     expect(component.userModelAccessLevel).toBe("WRITE");
     expect(component.modelCreationTime).not.toBe("");
+  });
+
+  it("records a view and loads the like state when the page opens", () => {
+    create();
+
+    expect(hubService["postView"]).toHaveBeenCalledWith(MID, MOCK_USER_ID, EntityType.Model);
+    expect(component.viewCount).toBe(7);
+    expect(hubService["getCounts"]).toHaveBeenCalledWith([EntityType.Model], [MID], [ActionType.Like]);
+    expect(component.likeCount).toBe(3);
+    expect(hubService["isLiked"]).toHaveBeenCalledWith([MID], [EntityType.Model]);
+    expect(component.isLiked).toBe(true);
+  });
+
+  it("posts an anonymous view as uid 0 and does not ask whether it is liked", () => {
+    vi.spyOn(TestBed.inject(UserService), "getCurrentUser").mockReturnValue(undefined);
+    create();
+
+    expect(hubService["postView"]).toHaveBeenCalledWith(MID, 0, EntityType.Model);
+    expect(hubService["isLiked"]).not.toHaveBeenCalled();
+    expect(component.isLiked).toBe(false);
+  });
+
+  it("takes both the like flag and the count from the toggle's response", () => {
+    create();
+
+    component.toggleLike();
+
+    expect(hubService["toggleLike"]).toHaveBeenCalledWith(MID, EntityType.Model, true);
+    expect(component.isLiked).toBe(false);
+    expect(component.likeCount).toBe(2);
+  });
+
+  it("does not try to like as an anonymous viewer", () => {
+    vi.spyOn(TestBed.inject(UserService), "getCurrentUser").mockReturnValue(undefined);
+    create();
+
+    component.toggleLike();
+
+    expect(hubService["toggleLike"]).not.toHaveBeenCalled();
   });
 
   it("skips the cover fetch for a model that has none", () => {
@@ -411,29 +455,6 @@ describe("ModelDetailComponent", () => {
     expect(component.isDownloadAllowed()).toBe(true);
   });
 
-  // ─── the file path clipboard ────────────────────────────────────────────────
-
-  it("copies the open file's path and reports failure", async () => {
-    create();
-    const writeText = vi.fn(() => Promise.resolve());
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-
-    render({ currentDisplayedFileName: "/model/a/b/v1/model.pt" });
-    await component.copyCurrentFilePath();
-    expect(writeText).toHaveBeenCalledWith("/model/a/b/v1/model.pt");
-    expect(notificationService["success"]).toHaveBeenCalled();
-
-    writeText.mockImplementationOnce(() => Promise.reject(new Error("denied")));
-    await component.copyCurrentFilePath();
-    expect(notificationService["error"]).toHaveBeenCalled();
-
-    // Nothing open: no clipboard call at all.
-    writeText.mockClear();
-    render({ currentDisplayedFileName: "" });
-    await component.copyCurrentFilePath();
-    expect(writeText).not.toHaveBeenCalled();
-  });
-
   // ─── template ───────────────────────────────────────────────────────────────
 
   it("renders the model's name, tags and stats", () => {
@@ -447,25 +468,21 @@ describe("ModelDetailComponent", () => {
     expect(root.textContent).toContain("torchscript");
   });
 
-  it("shows view and like counters as placeholder zeros", () => {
-    // The hub backend has no model entity type yet, so nothing populates these and
-    // nothing may call the hub from this page.
+  it("renders the view and like counters the hub reported", () => {
     create();
     const tags = q(render(), ".status-tag-row").textContent ?? "";
 
-    expect(tags.match(/\b0\b/g)?.length).toBe(2);
-    expect(component.viewCount).toBe(0);
-    expect(component.likeCount).toBe(0);
+    expect(tags).toContain("7");
+    expect(tags).toContain("3");
   });
 
-  it("dashes out the latest-version facts for a model with no versions", () => {
+  it("makes the like tag clickable only for a signed-in viewer", () => {
     create();
-    const stats = q(render(), ".data-card-stats").textContent ?? "";
+    const like = q(render(), ".like-tag") as HTMLElement;
+    expect(like.classList).not.toContain("disabled");
 
-    // "0 B" would assert a zero-byte version that does not exist; the card already
-    // uses an em dash for an absent framework or format.
-    expect(stats).not.toContain("0 B");
-    expect(stats.match(/—/g)?.length).toBe(3);
+    like.click();
+    expect(hubService["toggleLike"]).toHaveBeenCalled();
   });
 
   it("shows the empty-version notice until a version exists", () => {
@@ -504,6 +521,51 @@ describe("ModelDetailComponent", () => {
   //
   // The panel itself is covered by version-uploader.component.spec.ts; what matters here is that
   // the page hands it the model's own addressing, and what the page still owns around it.
+
+  it("offers the tree's write controls only to a writer", () => {
+    // A fresh page per access level: the Settings tab is gated on write access, so flipping the
+    // level on a live component removes a tab and nz-tabs can tear down the pane being asserted on.
+    const treeFor = (level: "READ" | "WRITE") => {
+      create();
+      component.userModelAccessLevel = level;
+      openTab("Versions & Files");
+      const filetree = fixture.debugElement.query(By.css("texera-user-dataset-version-filetree"));
+      expect(filetree, "expected the file tree to be rendered").not.toBeNull();
+      return filetree.componentInstance;
+    };
+
+    expect(treeFor("WRITE").isTreeNodeDeletable).toBe(true);
+    expect(treeFor("WRITE").isCoverSettable).toBe(true);
+
+    expect(treeFor("READ").isTreeNodeDeletable).toBe(false);
+    expect(treeFor("READ").isCoverSettable).toBe(false);
+  });
+
+  it("em-dashes the facts a model with no versions has none of, but keeps 0 B for its size", () => {
+    create();
+    const root = render({
+      versions: [],
+      latestVersionCreationTime: "",
+      latestVersionFileName: "",
+      latestVersionSize: undefined,
+      modelFormat: "",
+    });
+
+    /** The stat value rendered beside a label. */
+    const stat = (label: string): string => {
+      const row = Array.from(root.querySelectorAll<HTMLElement>(".stat-row")).find(
+        r => (q<HTMLElement>(r, ".stat-label").textContent ?? "").trim() === label
+      );
+      expect(row, `expected a stat row labelled "${label}"`).toBeDefined();
+      return (q<HTMLElement>(row!, ".stat-value").textContent ?? "").trim();
+    };
+
+    expect(stat("Last updated")).toBe("—");
+    expect(stat("Latest version file")).toBe("—");
+    expect(stat("Format")).toBe("—");
+    // A size has a meaningful zero, so it reads 0 B here and on the dataset page.
+    expect(stat("Latest version size")).toBe("0 B");
+  });
 
   it("hands the version uploader the model endpoint and the model's identity", () => {
     create();
@@ -932,13 +994,13 @@ describe("ModelDetailComponent", () => {
     const root = openTab("Versions & Files");
 
     expect(root.querySelector("nz-sider")).not.toBeNull();
-    component.onClickHideRightBar();
+    // The browser owns the toolbar controls; the page keeps the two flags and feeds them back in.
+    component.isRightBarCollapsed = true;
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector("nz-sider")).toBeNull();
 
-    component.onClickScaleTheView();
+    component.isMaximized = true;
     fixture.detectChanges();
-    expect(component.isMaximized).toBe(true);
     expect(fixture.nativeElement.querySelector(".model-header")).toBeNull();
   });
 
@@ -963,23 +1025,6 @@ describe("ModelDetailComponent", () => {
 
     expect(component.isLogin).toBe(true);
     expect(component.currentUid).toBe(42);
-  });
-
-  // ─── the resizable sider ────────────────────────────────────────────────────
-
-  it("stores the dragged sider width on the next animation frame", async () => {
-    create();
-    expect(component.siderWidth).toBe(400);
-
-    // A drag emits continuously; the component coalesces to one write per frame.
-    component.onSideResize({ width: 250, height: 999 });
-
-    // The write is deferred, not immediate — that deferral is the whole point of the
-    // requestAnimationFrame hop, and a synchronous assignment would land here.
-    expect(component.siderWidth).toBe(400);
-    await nextFrame();
-
-    expect(component.siderWidth).toBe(250);
   });
 
   // ─── guards against an absent model id ──────────────────────────────────────
@@ -1278,19 +1323,6 @@ describe("ModelDetailComponent", () => {
     render({ isOwner: false, modelIsDownloadable: false, modelIsPublic: true });
     expect(byTooltip("Download the file").disabled).toBe(true);
     expect(q<HTMLButtonElement>(fixture.nativeElement, ".spaced-button").disabled).toBe(true);
-  });
-
-  it("wires the sider's resize handle to the width the page keeps", async () => {
-    oneVersionWithOneFile();
-    create();
-    openTab("Versions & Files");
-
-    const sider = fixture.debugElement.query(By.directive(NzResizableDirective));
-    expect(sider).not.toBeNull();
-    sider.injector.get(NzResizableDirective).nzResize.emit({ width: 275, height: 0 });
-    await nextFrame();
-
-    expect(component.siderWidth).toBe(275);
   });
 
   it("wires the version picker to both the selection and the file tree", () => {

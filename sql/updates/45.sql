@@ -21,12 +21,30 @@
 
 SET search_path TO texera_db;
 
--- Adds the 'slurm' computing-unit type: a computing unit that runs as a Slurm batch job on
--- a compute node, with its host:port recorded in workflow_computing_unit.uri once the job
--- starts. Complements 'local' and 'kubernetes'; nothing about the existing two changes.
+BEGIN;
+
+-- Remove the deprecated "project" feature (user projects: colour-tagged
+-- collections of workflows, with sharing and public projects). See issue #5172.
 --
--- ALTER TYPE ... ADD VALUE cannot run inside a transaction block in PostgreSQL versions
--- before 12, and even where it is permitted the new value is unusable in the same
--- transaction. So this statement is deliberately left outside BEGIN/COMMIT, unlike the
--- other update scripts.
-ALTER TYPE workflow_computing_unit_type_enum ADD VALUE IF NOT EXISTS 'slurm';
+-- IRREVERSIBLE, USER-VISIBLE DATA LOSS: every project (name, description,
+-- colour), every workflow-to-project assignment, every project access grant and
+-- every public-project listing is deleted. Workflows, datasets and their own
+-- access grants are untouched -- but a workflow that a user could previously
+-- reach ONLY through a project share becomes inaccessible to that user, because
+-- workflow access is now decided solely by workflow_user_access. Deployment
+-- administrators who want to preserve those grants must copy them into
+-- workflow_user_access BEFORE applying this migration.
+--
+-- Dropped in FK-dependency order (children first). The pgroonga index
+-- idx_project_pgroonga is dropped implicitly with its table.
+DROP TABLE IF EXISTS public_project;
+DROP TABLE IF EXISTS project_user_access;
+DROP TABLE IF EXISTS workflow_of_project;
+DROP TABLE IF EXISTS project;
+
+-- The gui.tabs.projects_enabled key is gone from default.conf, so this seeded
+-- row would be orphaned: it is no longer served by /config/settings/public and
+-- the admin update endpoint rejects keys with no default.conf entry.
+DELETE FROM site_settings WHERE key = 'projects_enabled';
+
+COMMIT;

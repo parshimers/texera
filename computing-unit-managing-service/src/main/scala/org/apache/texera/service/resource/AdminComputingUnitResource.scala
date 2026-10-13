@@ -73,7 +73,7 @@ class AdminComputingUnitResource {
         .asScala
         .toList
 
-    val podPhases = ComputingUnitHelpers.podPhasesFor(activeUnits)
+    val podSnapshots = ComputingUnitHelpers.podSnapshotsFor(activeUnits)
     val slurmJobs = ComputingUnitHelpers.slurmJobsFor(activeUnits)
 
     // Wrap only the reconcile write, not the Kubernetes round trips above: keeps a pooled
@@ -83,7 +83,7 @@ class AdminComputingUnitResource {
     val liveUnits = SqlServer.withTransaction(ctx) { txCtx =>
       val dao = new WorkflowComputingUnitDao(txCtx.configuration())
       ComputingUnitHelpers.recordSlurmAddresses(dao, activeUnits, slurmJobs.getOrElse(Map.empty))
-      ComputingUnitHelpers.reconcileVanishedUnits(dao, activeUnits, podPhases, slurmJobs)
+      ComputingUnitHelpers.reconcileVanishedUnits(dao, activeUnits, podSnapshots, slurmJobs)
     }
 
     // Metrics only for survivors, so fetch after reconciliation.
@@ -96,9 +96,10 @@ class AdminComputingUnitResource {
       ComputingUnitHelpers.buildDashboardUnit(
         unit,
         isOwner = unit.getUid.equals(user.getUid),
+        canViewStatusReason = true,
         accessPrivilege = PrivilegeEnum.WRITE,
         ownerInfo = ownerInfo,
-        podPhases = podPhases,
+        podSnapshots = podSnapshots,
         podMetrics = podMetrics,
         slurmJobs = slurmJobs.getOrElse(Map.empty)
       )

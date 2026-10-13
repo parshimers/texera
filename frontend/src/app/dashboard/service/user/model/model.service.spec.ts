@@ -106,6 +106,13 @@ describe("ModelService", () => {
     http.verify();
   });
 
+  it("lists the models the caller owns or has been granted", async () => {
+    const pending = firstValueFrom(service.retrieveAccessibleModels());
+    const req = http.expectOne(`${API}/model/list`);
+    expect(req.request.method).toBe("GET");
+    req.flush([]);
+    expect(await pending).toEqual([]);
+  });
   it("posts a create request under the model-shaped field names", () => {
     // The backend reads modelName/isModelPublic; the dataset spellings would be silently dropped.
     service.createModel(newModel({ isPublic: true, isDownloadable: true })).subscribe();
@@ -130,12 +137,6 @@ describe("ModelService", () => {
     http.expectOne(`${API}/model/create`).flush(created);
 
     expect(await pending).toEqual(created);
-  });
-
-  it("lists the accessible models, including when the user has none", async () => {
-    const pending = firstValueFrom(service.retrieveAccessibleModels());
-    http.expectOne(`${API}/model/list`).flush([]);
-    expect(await pending).toEqual([]);
   });
 
   it("deletes by id", () => {
@@ -206,8 +207,8 @@ describe("ModelService", () => {
     const presign = http.expectOne(
       `${API}/model/presign-download?filePath=${encodeURIComponent("/model/a/m/v1/model.pt")}`
     );
-    presign.flush({ presignedUrl: "http://minio/model.pt" });
-    http.expectOne("http://minio/model.pt").flush(blob);
+    presign.flush({ presignedUrl: "http://rustfs/model.pt" });
+    http.expectOne("http://rustfs/model.pt").flush(blob);
 
     expect(await pending).toEqual(blob);
   });
@@ -216,8 +217,8 @@ describe("ModelService", () => {
     service.retrieveModelVersionSingleFile("/model/a/m/v1/model.pt", false).subscribe();
     http
       .expectOne(`${API}/model/public-presign-download?filePath=${encodeURIComponent("/model/a/m/v1/model.pt")}`)
-      .flush({ presignedUrl: "http://minio/model.pt" });
-    http.expectOne("http://minio/model.pt").flush(new Blob());
+      .flush({ presignedUrl: "http://rustfs/model.pt" });
+    http.expectOne("http://rustfs/model.pt").flush(new Blob());
   });
 
   it("reads the presigned cover url, which is null for a model without one", async () => {
@@ -284,8 +285,8 @@ describe("ModelService", () => {
   });
 
   it("surfaces a server error rather than swallowing it", async () => {
-    const outcome = firstValueFrom(service.retrieveAccessibleModels()).catch((err: unknown) => err);
-    http.expectOne(`${API}/model/list`).flush({ message: "nope" }, { status: 500, statusText: "Server Error" });
+    const outcome = firstValueFrom(service.getModel(7)).catch((err: unknown) => err);
+    http.expectOne(`${API}/model/7`).flush({ message: "nope" }, { status: 500, statusText: "Server Error" });
     expect(await outcome).toMatchObject({ status: 500 });
   });
 });
