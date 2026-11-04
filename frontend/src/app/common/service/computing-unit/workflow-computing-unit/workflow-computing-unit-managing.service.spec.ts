@@ -97,6 +97,25 @@ describe("WorkflowComputingUnitManagingService", () => {
     });
   });
 
+  describe("createSlurmComputingUnit", () => {
+    it("POSTs a slurm body with only a name: the job JSON decides the rest", () => {
+      service.createSlurmComputingUnit("hpc").subscribe();
+
+      const req = httpMock.expectOne(`${api}/${COMPUTING_UNIT_CREATE_URL}`);
+      expect(req.request.body).toEqual({
+        name: "hpc",
+        cpuLimit: "NaN",
+        memoryLimit: "NaN",
+        gpuLimit: "NaN",
+        jvmMemorySize: "NaN",
+        shmSize: "NaN",
+        uri: "",
+        unitType: "slurm",
+      });
+      req.flush(unitWithResource({ cpuLimit: "NaN" }));
+    });
+  });
+
   describe("resource parsing", () => {
     // A malformed, `NULL` or `"null"` resource gets the placeholder instead of crashing the readers of the unit.
     it.each([

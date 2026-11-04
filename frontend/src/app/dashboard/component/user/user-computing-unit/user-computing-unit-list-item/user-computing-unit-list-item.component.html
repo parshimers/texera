@@ -111,6 +111,7 @@
     </div>
 
     <div
+      *ngIf="hasResourceLimits()"
       nz-button
       nz-popover
       [nzPopoverContent]="metricsTemplate"
@@ -155,6 +156,7 @@
     </div>
 
     <div
+      *ngIf="hasResourceLimits()"
       nz-col
       nzFlex="90px"
       class="resource-info">
@@ -163,6 +165,7 @@
     </div>
 
     <div
+      *ngIf="hasResourceLimits()"
       nz-col
       nzFlex="90px"
       class="resource-info">

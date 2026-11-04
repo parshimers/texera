@@ -30,7 +30,7 @@ import org.apache.texera.dao.jooq.generated.enums.PrivilegeEnum
 import org.apache.texera.dao.jooq.generated.tables.daos.{UserDao, WorkflowComputingUnitDao}
 import org.apache.texera.dao.jooq.generated.tables.pojos.WorkflowComputingUnit
 import org.apache.texera.service.resource.ComputingUnitManagingResource.DashboardWorkflowComputingUnit
-import org.apache.texera.service.util.{ClusterCapacity, ComputingUnitHelpers}
+import org.apache.texera.service.util.{ClusterCapacity, ComputingUnitHelpers, SlurmRestClient}
 import org.jooq.DSLContext
 
 import scala.annotation.unused
@@ -50,7 +50,7 @@ object AdminComputingUnitResource {
 @Produces(Array(MediaType.APPLICATION_JSON))
 @Path("/computing-unit/admin")
 @RolesAllowed(Array("ADMIN"))
-class AdminComputingUnitResource {
+class AdminComputingUnitResource(slurm: => SlurmRestClient = SlurmRestClient) {
 
   import AdminComputingUnitResource._
 
@@ -75,16 +75,19 @@ class AdminComputingUnitResource {
         .toList
 
     val podSnapshots = ComputingUnitHelpers.podSnapshotsFor(activeUnits)
+    val slurmJobs = ComputingUnitHelpers.slurmJobsFor(activeUnits, slurm)
 
-    // Wrap only the reconcile write, not the Kubernetes round trips above: keeps a pooled
+    // Wrap only the reconcile write, not the cluster round trips above: keeps a pooled
     // connection from being held open across them, while the transaction makes the batchUpdate
     // all-or-nothing (autocommit would retire only some vanished units on a mid-batch failure).
 
     val liveUnits = SqlServer.withTransaction(ctx) { txCtx =>
-      ComputingUnitHelpers.reconcileVanishedKubernetesUnits(
-        new WorkflowComputingUnitDao(txCtx.configuration()),
-        activeUnits,
-        podSnapshots
+      val dao = new WorkflowComputingUnitDao(txCtx.configuration())
+      ComputingUnitHelpers.reconcileSlurmUnits(
+        dao,
+        ComputingUnitHelpers.reconcileVanishedKubernetesUnits(dao, activeUnits, podSnapshots),
+        slurmJobs,
+        slurm
       )
     }
 
@@ -102,7 +105,8 @@ class AdminComputingUnitResource {
         accessPrivilege = PrivilegeEnum.WRITE,
         ownerInfo = ownerInfo,
         podSnapshots = podSnapshots,
-        podMetrics = podMetrics
+        podMetrics = podMetrics,
+        slurmJobs = slurmJobs
       )
     }
   }

@@ -20,7 +20,8 @@ package org.apache.texera.service.util
 
 import io.fabric8.kubernetes.client.KubernetesClientException
 import jakarta.ws.rs.NotFoundException
-import org.apache.texera.common.config.KubernetesConfig
+import org.apache.texera.common.config.{ComputingUnitConfig, KubernetesConfig}
+import org.apache.texera.dao.jooq.generated.Tables.WORKFLOW_COMPUTING_UNIT
 import org.apache.texera.dao.jooq.generated.enums.{
   WorkflowComputingUnitTerminationReasonEnum,
   WorkflowComputingUnitTypeEnum
@@ -39,10 +40,13 @@ import org.apache.texera.service.resource.ComputingUnitState.{
   Terminating,
   Unknown
 }
-import org.jooq.EnumType
+import org.jooq.{Condition, DSLContext, EnumType}
+import org.jooq.impl.DSL
+import play.api.libs.json.{JsObject, Json}
 
 import java.sql.Timestamp
 import scala.jdk.CollectionConverters.{CollectionHasAsScala, SeqHasAsJava}
+import scala.util.Try
 
 object ComputingUnitHelpers {
 
@@ -83,7 +87,8 @@ object ComputingUnitHelpers {
     */
   private[util] def singleUnitStatusAndReason(
       unit: WorkflowComputingUnit,
-      k8s: => KubernetesClient
+      k8s: => KubernetesClient,
+      slurm: => SlurmRestClient = SlurmRestClient
   ): (ComputingUnitState, Option[String]) = {
     unit.getType match {
       // Local CUs are always “running”
@@ -97,6 +102,13 @@ object ComputingUnitHelpers {
           client
             .getPodByName(client.generatePodName(unit.getCuid))
             .map(PodStatusSnapshot.fromPod)
+        )
+
+      case WorkflowComputingUnitTypeEnum.slurm =>
+        slurmUnitStatusAndReason(
+          unit,
+          slurmJobsFor(Seq(unit), slurm).get(unit.getCuid),
+          ComputingUnitConfig.slurmUnitAddressTemplate
         )
 
       // Any other (unknown) type is treated as pending
@@ -197,6 +209,275 @@ object ComputingUnitHelpers {
           (Pending, None)
     }
 
+  private val SlurmUnavailableReason =
+    "The state of the computing unit cannot be determined because Slurm cannot be reached."
+  private val SlurmJobGoneReason =
+    "The computing unit's Slurm job no longer exists. Please recreate the unit."
+  private val SlurmOutOfMemoryReason =
+    "The computing unit's Slurm job ran out of memory. Please contact an administrator."
+  private val SlurmTimeLimitReason =
+    "The computing unit's Slurm job reached its time limit. Please recreate the unit."
+  private val SlurmNodeFailureReason =
+    "The node running the computing unit's Slurm job failed. Please recreate the unit."
+  private val SlurmPreemptedReason =
+    "The computing unit's Slurm job was preempted by other work. Please recreate the unit."
+  private val SlurmCancelledReason =
+    "The computing unit's Slurm job was cancelled outside Texera. Please recreate the unit."
+  private val SlurmCompletedReason =
+    "The computing unit's Slurm job exited. Please recreate the unit, or contact an administrator."
+  private val SlurmFailedReason =
+    "The computing unit's Slurm job failed. Please recreate the unit, or contact an administrator."
+
+  // Base job states that end a job. The array also carries flags, like COMPLETING, on any state.
+  private val SlurmEndedReasons: Seq[(String, String)] = Seq(
+    "OUT_OF_MEMORY" -> SlurmOutOfMemoryReason,
+    "TIMEOUT" -> SlurmTimeLimitReason,
+    "NODE_FAIL" -> SlurmNodeFailureReason,
+    "BOOT_FAIL" -> SlurmNodeFailureReason,
+    "PREEMPTED" -> SlurmPreemptedReason,
+    "CANCELLED" -> SlurmCancelledReason,
+    "COMPLETED" -> SlurmCompletedReason,
+    "FAILED" -> SlurmFailedReason,
+    "DEADLINE" -> SlurmTimeLimitReason
+  )
+
+  /**
+    * A job counts as Running once it holds its node. CONFIGURING means the node is still booting,
+    * and a job without a batch host has nowhere to route to.
+    */
+  private def isSlurmJobRunning(job: SlurmJobSnapshot): Boolean =
+    job.states("RUNNING") && !job.states("COMPLETING") && !job.states("CONFIGURING") &&
+      job.node.isDefined
+
+  /** Pure (lookup -> state, reason) mapping, the Slurm counterpart of the pod mapping above. */
+  private[util] def slurmStatusAndReason(
+      lookup: Option[SlurmJobLookup]
+  ): (ComputingUnitState, Option[String]) =
+    lookup match {
+      case None                         => (Pending, None)
+      case Some(SlurmJobGone)           => (Failed, Some(SlurmJobGoneReason))
+      case Some(SlurmJobUnavailable(_)) => (Unknown, Some(SlurmUnavailableReason))
+      case Some(SlurmJobFound(job)) =>
+        val ended = SlurmEndedReasons.collectFirst {
+          case (state, reason) if job.states(state) => reason
+        }
+        if (job.states("COMPLETING")) (Terminating, None)
+        else if (ended.isDefined) (Failed, ended)
+        else if (isSlurmJobRunning(job)) (Running, None)
+        else if (job.states("SUSPENDED"))
+          (Pending, Some("The computing unit's Slurm job is suspended."))
+        else
+          (
+            Pending,
+            job.reason.map(reason => s"The computing unit is waiting in the Slurm queue ($reason).")
+          )
+    }
+
+  /** The Slurm job a unit was submitted as. Recorded in the same transaction that creates it. */
+  def slurmJobId(unit: WorkflowComputingUnit): Option[Long] =
+    Option(unit.getResource).flatMap { resource =>
+      Try(Json.parse(resource)).toOption.flatMap(json => (json \ "slurmJobId").asOpt[Long])
+    }
+
+  private def isSlurm(unit: WorkflowComputingUnit): Boolean =
+    unit.getType == WorkflowComputingUnitTypeEnum.slurm
+
+  /**
+    * One lookup per Slurm unit, keyed by cuid. Per unit because slurmrestd's bulk listing returns
+    * every job on the cluster, which on a shared one is far more than a user's handful of units.
+    * The client is by-name, so a deployment with no Slurm units issues no request.
+    */
+  def slurmJobsFor(
+      units: Seq[WorkflowComputingUnit],
+      slurm: => SlurmRestClient = SlurmRestClient
+  ): Map[Integer, SlurmJobLookup] = {
+    val slurmUnits = units.filter(isSlurm)
+    if (slurmUnits.isEmpty) Map.empty
+    else {
+      val client = slurm
+      slurmUnits.map { unit =>
+        unit.getCuid -> slurmJobId(unit).map(client.lookupJob).getOrElse(SlurmJobGone)
+      }.toMap
+    }
+  }
+
+  private val SlurmNodeOccupiedReason =
+    "The computing unit's Slurm job was placed on a node already running another computing unit. " +
+      "It waits for that node, and will likely fail: please contact an administrator, whose job " +
+      "JSON must keep computing units on separate nodes."
+
+  private def slurmAddress(job: SlurmJobSnapshot, template: String): Option[String] =
+    Option.when(isSlurmJobRunning(job))(job.node).flatten.map(SlurmUnitAddress.resolve(template, _))
+
+  /**
+    * As [[slurmStatusAndReason]], but a job only counts as Running once its unit holds the address.
+    * [[reconcileSlurmUnits]] withholds one that another unit holds.
+    */
+  private def slurmUnitStatusAndReason(
+      unit: WorkflowComputingUnit,
+      lookup: Option[SlurmJobLookup],
+      addressTemplate: String
+  ): (ComputingUnitState, Option[String]) =
+    slurmStatusAndReason(lookup) match {
+      case (Running, _)
+          if lookup
+            .collect { case SlurmJobFound(job) => job }
+            .flatMap(slurmAddress(_, addressTemplate))
+            .exists(_ != unit.getUri) =>
+        (Pending, Some(SlurmNodeOccupiedReason))
+      case status => status
+    }
+
+  private def setSlurmUnitAddress(
+      ctx: DSLContext,
+      unit: WorkflowComputingUnit,
+      address: String,
+      alsoWhen: Condition = DSL.noCondition()
+  ): Boolean = {
+    val resource = Json.stringify(
+      Try(Json.parse(unit.getResource).as[JsObject]).getOrElse(Json.obj()) ++
+        Json.obj("nodeAddresses" -> (if (address.isEmpty) Json.arr() else Json.arr(address)))
+    )
+    val updated = ctx
+      .update(WORKFLOW_COMPUTING_UNIT)
+      .set(WORKFLOW_COMPUTING_UNIT.URI, address)
+      .set(WORKFLOW_COMPUTING_UNIT.RESOURCE, resource)
+      .where(
+        WORKFLOW_COMPUTING_UNIT.CUID
+          .eq(unit.getCuid)
+          .and(WORKFLOW_COMPUTING_UNIT.TERMINATE_TIME.isNull)
+          .and(alsoWhen)
+      )
+      .execute() == 1
+    if (updated) {
+      unit.setUri(address)
+      unit.setResource(resource)
+    }
+    updated
+  }
+
+  /** Clears `address` from any other live unit whose job is no longer known to be running there. */
+  private def releaseStaleHoldersOfSlurmAddress(
+      ctx: DSLContext,
+      unit: WorkflowComputingUnit,
+      address: String,
+      addressTemplate: String,
+      slurm: => SlurmRestClient
+  ): Unit = {
+    val holders = ctx
+      .selectFrom(WORKFLOW_COMPUTING_UNIT)
+      .where(
+        WORKFLOW_COMPUTING_UNIT.URI
+          .eq(address)
+          .and(WORKFLOW_COMPUTING_UNIT.TYPE.eq(WorkflowComputingUnitTypeEnum.slurm))
+          .and(WORKFLOW_COMPUTING_UNIT.TERMINATE_TIME.isNull)
+          .and(WORKFLOW_COMPUTING_UNIT.CUID.ne(unit.getCuid))
+      )
+      .fetchInto(classOf[WorkflowComputingUnit])
+      .asScala
+      .toList
+    val holderJobs = slurmJobsFor(holders, slurm)
+    holders.foreach { holder =>
+      holderJobs.get(holder.getCuid) match {
+        case Some(SlurmJobUnavailable(_))                                                     =>
+        case Some(SlurmJobFound(job)) if slurmAddress(job, addressTemplate).contains(address) =>
+        case _                                                                                =>
+          // Its owner may be offline, leaving nothing to poll that row, so nothing else would.
+          setSlurmUnitAddress(ctx, holder, "")
+      }
+    }
+  }
+
+  /**
+    * Applies what Slurm reports to the rows, returning the units still live: a job Slurm no longer
+    * knows retires its unit, and a job's address, which cannot be known at submission, follows
+    * whether the job is running. The gateway routes on that address alone, so it is withheld while
+    * another live unit holds it: a job briefly alive on a node already hosting a unit must not
+    * send its user to that other user's unit.
+    *
+    * Rows are updated column by column and only while unterminated, so a poll that read a unit just
+    * before its owner terminated it cannot undo the termination.
+    */
+  def reconcileSlurmUnits(
+      dao: WorkflowComputingUnitDao,
+      units: List[WorkflowComputingUnit],
+      slurmJobs: Map[Integer, SlurmJobLookup],
+      slurm: => SlurmRestClient = SlurmRestClient,
+      addressTemplate: String = ComputingUnitConfig.slurmUnitAddressTemplate
+  ): List[WorkflowComputingUnit] = {
+    val ctx = DSL.using(dao.configuration())
+    units.filter { unit =>
+      slurmJobs.get(unit.getCuid) match {
+        case Some(SlurmJobGone) if unit.getTerminateTime == null =>
+          val now = new Timestamp(System.currentTimeMillis())
+          val reason = WorkflowComputingUnitTerminationReasonEnum.GARBAGE_COLLECTED
+          ctx
+            .update(WORKFLOW_COMPUTING_UNIT)
+            .set(WORKFLOW_COMPUTING_UNIT.TERMINATE_TIME, now)
+            .set(WORKFLOW_COMPUTING_UNIT.TERMINATION_REASON, reason)
+            .where(
+              WORKFLOW_COMPUTING_UNIT.CUID
+                .eq(unit.getCuid)
+                .and(WORKFLOW_COMPUTING_UNIT.TERMINATE_TIME.isNull)
+            )
+            .execute()
+          unit.setTerminateTime(now)
+          unit.setTerminationReason(reason)
+          false
+        case Some(SlurmJobFound(job)) if unit.getTerminateTime == null =>
+          val address = slurmAddress(job, addressTemplate).getOrElse("")
+          if (address != unit.getUri) {
+            if (address.isEmpty) {
+              setSlurmUnitAddress(ctx, unit, "")
+            } else {
+              releaseStaleHoldersOfSlurmAddress(ctx, unit, address, addressTemplate, slurm)
+              val held = WORKFLOW_COMPUTING_UNIT.as("held")
+              setSlurmUnitAddress(
+                ctx,
+                unit,
+                address,
+                DSL.notExists(
+                  DSL
+                    .selectOne()
+                    .from(held)
+                    .where(
+                      held.URI
+                        .eq(address)
+                        .and(held.TERMINATE_TIME.isNull)
+                        .and(held.TYPE.eq(WorkflowComputingUnitTypeEnum.slurm))
+                        .and(held.CUID.ne(unit.getCuid))
+                    )
+                )
+              )
+            }
+          }
+          true
+        case _ => true
+      }
+    }
+  }
+
+  /**
+    * Status of one unit for the endpoints that serve a single row. A Slurm unit is reconciled as
+    * well, so its address is recorded whichever endpoint the frontend happens to poll.
+    */
+  def reconcileAndGetStatusWithReason(
+      dao: WorkflowComputingUnitDao,
+      unit: WorkflowComputingUnit,
+      slurm: => SlurmRestClient = SlurmRestClient
+  ): (ComputingUnitState, Option[String]) =
+    if (isSlurm(unit)) {
+      val jobs = slurmJobsFor(Seq(unit), slurm)
+      reconcileSlurmUnits(dao, List(unit), jobs, slurm)
+      slurmUnitStatusAndReason(
+        unit,
+        jobs.get(unit.getCuid),
+        ComputingUnitConfig.slurmUnitAddressTemplate
+      )
+    } else {
+      getComputingUnitStatusWithReason(unit)
+    }
+
   def getComputingUnitMetrics(unit: WorkflowComputingUnit): WorkflowComputingUnitMetrics = {
     unit.getType match {
       case WorkflowComputingUnitTypeEnum.local =>
@@ -218,13 +499,20 @@ object ComputingUnitHelpers {
     */
   def getComputingUnitStatusAndReason(
       unit: WorkflowComputingUnit,
-      podSnapshots: Map[String, PodStatusSnapshot]
+      podSnapshots: Map[String, PodStatusSnapshot],
+      slurmJobs: Map[Integer, SlurmJobLookup] = Map.empty
   ): (ComputingUnitState, Option[String]) = {
     unit.getType match {
       case WorkflowComputingUnitTypeEnum.local =>
         (Running, None)
       case WorkflowComputingUnitTypeEnum.kubernetes =>
         kubernetesStatusAndReason(podSnapshots.get(KubernetesClient.generatePodName(unit.getCuid)))
+      case WorkflowComputingUnitTypeEnum.slurm =>
+        slurmUnitStatusAndReason(
+          unit,
+          slurmJobs.get(unit.getCuid),
+          ComputingUnitConfig.slurmUnitAddressTemplate
+        )
       case _ =>
         (Pending, None)
     }
@@ -349,10 +637,11 @@ object ComputingUnitHelpers {
       accessPrivilege: EnumType,
       ownerInfo: Map[Integer, (String, String)],
       podSnapshots: Map[String, PodStatusSnapshot],
-      podMetrics: Map[String, Map[String, String]]
+      podMetrics: Map[String, Map[String, String]],
+      slurmJobs: Map[Integer, SlurmJobLookup] = Map.empty
   ): DashboardWorkflowComputingUnit = {
     val owner = ownerInfo.getOrElse(unit.getUid, (null, null))
-    val (status, statusReason) = getComputingUnitStatusAndReason(unit, podSnapshots)
+    val (status, statusReason) = getComputingUnitStatusAndReason(unit, podSnapshots, slurmJobs)
     DashboardWorkflowComputingUnit(
       computingUnit = unit,
       status = status.toString,

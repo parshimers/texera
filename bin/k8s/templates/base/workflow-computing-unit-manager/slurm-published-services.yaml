@@ -1,0 +1,82 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+{{/*
+Publishes what a computing unit on a Slurm node needs, since a Slurm node has no cluster DNS and no
+route to a ClusterIP. Separate services rather than a changed type on the originals, so that nothing
+is published unless slurm.clusterAddress asks for it, whatever the subcharts' own values say.
+*/}}
+{{- define "texera.slurm.publishedService" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    {{- toYaml .selector | nindent 4 }}
+  ports:
+    - port: {{ .port }}
+      targetPort: {{ .targetPort }}
+{{- end }}
+
+{{- if include "texera.slurm.clusterAddress" . }}
+{{- $release := .Release.Name }}
+{{- $namespace := .Release.Namespace }}
+{{- include "texera.slurm.publishedService" (dict
+  "name" (printf "%s-slurm-postgresql" $release)
+  "namespace" $namespace
+  "selector" (dict "app.kubernetes.io/name" "postgresql" "app.kubernetes.io/instance" $release "app.kubernetes.io/component" "primary")
+  "port" 5432
+  "targetPort" "tcp-postgresql"
+) }}
+---
+{{- include "texera.slurm.publishedService" (dict
+  "name" (printf "%s-slurm-lakekeeper" $release)
+  "namespace" $namespace
+  "selector" (dict "app.kubernetes.io/name" "lakekeeper" "app.kubernetes.io/instance" $release "app.kubernetes.io/component" "catalog")
+  "port" .Values.lakekeeper.catalog.service.externalPort
+  "targetPort" "http"
+) }}
+---
+{{- include "texera.slurm.publishedService" (dict
+  "name" (printf "%s-slurm-lakefs" $release)
+  "namespace" $namespace
+  "selector" (dict "app" "lakefs" "app.kubernetes.io/name" "lakefs" "app.kubernetes.io/instance" $release)
+  "port" .Values.lakefs.service.port
+  "targetPort" "http"
+) }}
+---
+{{- include "texera.slurm.publishedService" (dict
+  "name" (printf "%s-slurm-file-service" $release)
+  "namespace" $namespace
+  "selector" (dict "app" (printf "%s-%s" $release .Values.fileService.name))
+  "port" .Values.fileService.service.port
+  "targetPort" .Values.fileService.service.port
+) }}
+{{- if and .Values.rustfs.enabled (not .Values.storage.s3.endpoint) }}
+---
+{{- include "texera.slurm.publishedService" (dict
+  "name" (printf "%s-slurm-object-store" $release)
+  "namespace" $namespace
+  "selector" (dict "app.kubernetes.io/name" "rustfs" "app.kubernetes.io/instance" $release)
+  "port" 9000
+  "targetPort" 9000
+) }}
+{{- end }}
+{{- end }}

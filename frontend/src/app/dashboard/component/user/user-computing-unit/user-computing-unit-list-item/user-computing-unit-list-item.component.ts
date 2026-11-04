@@ -215,6 +215,11 @@ export class UserComputingUnitListItemComponent implements OnInit {
     return getComputingUnitBadgeColor(status);
   }
 
+  /** A Slurm job's limits are in the administrator's job JSON, and no usage is reported for it. */
+  hasResourceLimits(): boolean {
+    return this.entry.computingUnit.type !== "slurm";
+  }
+
   getUnitStatusTooltip(entry: DashboardWorkflowComputingUnit): string {
     return getComputingUnitStatusTooltip(entry);
   }

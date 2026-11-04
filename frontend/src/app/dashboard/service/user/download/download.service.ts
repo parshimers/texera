@@ -194,7 +194,7 @@ export class DownloadService {
     };
 
     const urlPath =
-      unit && unit.computingUnit.type == "kubernetes" && unit.computingUnit?.cuid
+      unit && unit.computingUnit.type !== "local" && unit.computingUnit?.cuid
         ? `${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/dataset?cuid=${unit.computingUnit.cuid}`
         : `${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/dataset`;
 
@@ -240,7 +240,7 @@ export class DownloadService {
     const token = localStorage.getItem(TOKEN_KEY) ?? "";
 
     const urlPath =
-      unit && unit.computingUnit.type == "kubernetes" && unit.computingUnit?.cuid
+      unit && unit.computingUnit.type !== "local" && unit.computingUnit?.cuid
         ? `${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/local?cuid=${unit.computingUnit.cuid}`
         : `${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/local`;
 

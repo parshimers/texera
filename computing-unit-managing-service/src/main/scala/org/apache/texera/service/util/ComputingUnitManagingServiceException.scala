@@ -25,8 +25,8 @@ import jakarta.ws.rs.WebApplicationException
 /**
   * Parent type for every error the CU-managing service can raise.
   */
-sealed abstract class ComputingUnitManagingServiceException(msg: String)
-    extends WebApplicationException(msg)
+sealed abstract class ComputingUnitManagingServiceException(msg: String, status: Int = 500)
+    extends WebApplicationException(msg, status)
 
 // Not enough cluster resources for this CU request (CPU / memory / GPU)
 final case class InsufficientComputingResource(resourceType: String)
@@ -38,6 +38,17 @@ final case class InsufficientComputingResource(resourceType: String)
 final case class InsufficientComputingUnitQuota(maxNumberOfComputingUnit: Int)
     extends ComputingUnitManagingServiceException(
       s"You may only have $maxNumberOfComputingUnit computing-unit(s) running at the same time"
+    )
+
+// slurmrestd could not be reached (503) or would not do what was asked (502)
+final case class SlurmRequestFailure(message: String, status: Int)
+    extends ComputingUnitManagingServiceException(message, status)
+
+// The job JSON is the administrator's to fix, and the deployment cannot create units until they do
+final case class InvalidSlurmJobJson(problem: String)
+    extends ComputingUnitManagingServiceException(
+      s"This deployment's Slurm job JSON is invalid: $problem.",
+      503
     )
 
 // default exception fallback

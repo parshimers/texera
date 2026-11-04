@@ -86,7 +86,7 @@
     <ng-container *ngFor="let unit of cuTable.data; trackBy: trackByCuid">
       <tr>
         <td
-          [nzShowExpand]="!isLocal(unit)"
+          [nzShowExpand]="hasResourceDetails(unit)"
           [nzExpand]="expandedCuids.has(unit.computingUnit.cuid)"
           (nzExpandChange)="onExpandChange(unit.computingUnit.cuid, $event)"></td>
         <td>{{ unit.computingUnit.name }}</td>

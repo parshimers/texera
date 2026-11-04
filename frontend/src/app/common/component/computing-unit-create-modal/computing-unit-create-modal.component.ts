@@ -278,7 +278,10 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
    * Start a new computing unit.
    */
   startComputingUnit(): void {
-    if (this.selectedComputingUnitType === "kubernetes" && this.newComputingUnitName.trim() === "") {
+    if (
+      (this.selectedComputingUnitType === "kubernetes" || this.selectedComputingUnitType === "slurm") &&
+      this.newComputingUnitName.trim() === ""
+    ) {
       this.notificationService.error("Name of the computing unit cannot be empty");
       return;
     }

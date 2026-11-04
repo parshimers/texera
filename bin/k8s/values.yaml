@@ -296,6 +296,49 @@ workflowComputingUnitManager:
   service:
     type: ClusterIP
     port: 8888
+  # Offer "Slurm" as a computing-unit type: each unit becomes a Slurm job, submitted through
+  # slurmrestd's unix socket, which is mapped in from the host running slurmrestd. See "Allocating
+  # computing units with Slurm" in README.md, which covers what a Slurm node must be able to reach
+  # and the isolation a unit gives up compared to a pod.
+  slurm:
+    enabled: false
+    # The directory on the host holding the socket, mapped in read-only. The directory rather than
+    # the socket, because slurmrestd recreates its socket on restart and a mount of the file would
+    # keep pointing at the old one. Everything in it becomes visible to this pod, so give the
+    # socket a directory of its own. A hostPath is forbidden by the `baseline` and `restricted` Pod
+    # Security Standards, so the release namespace must admit it. Not under /run, /var/lib or /etc:
+    # rootless k3s gives pods a copy of those made when it starts, so a directory created later
+    # does not exist for them.
+    socketHostDir: /srv/slurmrestd
+    socketFileName: slurmrestd.socket
+    # Must select the host running slurmrestd, or the pod has no socket to find and stays in
+    # ContainerCreating with an event naming the missing directory.
+    nodeSelector: {}
+    # slurmrestd's rest_auth/local accepts only the uid it runs as, and jobs run as that uid, so
+    # this is the uid of the Slurm user computing units run as. It also refuses a peer whose pid it
+    # cannot see, so slurmrestd has to run on the host itself and not in a container of its own.
+    # On rootless k3s this uid is remapped on its way to the host: see README.md.
+    runAsUser: 1001
+    runAsGroup: 1001
+    # The data_parser version in slurmrestd's URLs: see `slurmrestd -d list`.
+    apiVersion: v0.0.42
+    # The body of POST /slurm/<apiVersion>/job/submit, as a string. It decides everything about
+    # the job, including what runs: its script must start the computing-unit master. The manager
+    # adds to job.environment what a unit needs, and its entries win over those additions, which
+    # is how to give a Slurm node addresses of your own. Rendering the chart fails if this is not
+    # valid JSON.
+    jobJson: ""
+    # The address Slurm nodes reach this cluster's LoadBalancer services at; on k3s, any node's IP
+    # address. Slurm nodes cannot use cluster-internal names, so setting this publishes PostgreSQL,
+    # Lakekeeper, the object store, LakeFS and the file service as LoadBalancer services, gives
+    # units those addresses, and moves the deployment's object-store endpoint to it. Anything that
+    # can reach the address can reach them, with credentials that default to values published in
+    # this file: firewall it to the Slurm nodes and the cluster. Leave it empty when job.environment
+    # supplies addresses already.
+    clusterAddress: ""
+    # How the gateway reaches a running unit, with {node} replaced by the node Slurm chose. It has
+    # to resolve from the gateway, so qualify a bare Slurm node name if the cluster's DNS needs it.
+    unitAddressTemplate: "{node}:8085"
 
 workflowCompilingService:
   name: workflow-compiling-service

@@ -143,6 +143,31 @@ describe("UserComputingUnitListItemComponent", () => {
     expect(component).toBeTruthy();
   });
 
+  describe("resource limits", () => {
+    const render = (type: "kubernetes" | "local" | "slurm") => {
+      const base = makeEntry();
+      component.entry = { ...base, computingUnit: { ...base.computingUnit, type } };
+      fixture.detectChanges();
+      return fixture.nativeElement as HTMLElement;
+    };
+
+    it("shows no metric bars or limits for a slurm unit, whose limits are in its job JSON", () => {
+      const element = render("slurm");
+
+      expect(element.querySelector(".metrics-container")).toBeNull();
+      expect(element.textContent).not.toContain("CPU Limit");
+      expect(element.textContent).not.toContain("Memory Limit");
+      expect(element.textContent).toContain("Created");
+    });
+
+    it.each(["kubernetes", "local"] as const)("shows them for a %s unit", type => {
+      const element = render(type);
+
+      expect(element.querySelector(".metrics-container")).not.toBeNull();
+      expect(element.textContent).toContain("CPU Limit");
+    });
+  });
+
   describe("ngOnInit", () => {
     it("populates gpuOptions from the service", () => {
       expect(component.gpuOptions).toEqual(["0", "1"]);

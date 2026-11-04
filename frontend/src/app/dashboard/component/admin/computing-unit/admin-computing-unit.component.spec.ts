@@ -493,6 +493,28 @@ describe("AdminComputingUnitComponent", () => {
     });
   });
 
+  describe("slurm units", () => {
+    const slurmUnit = () => makeUnit(withCu({ type: "slurm", resource: NAN_RESOURCE }));
+
+    it("summarizes resources by where they are set", () => {
+      expect(component.resourceSummary(slurmUnit())).toBe("Slurm — set by the job JSON");
+    });
+
+    it("has no resource details to expand, as only a pod does", () => {
+      expect(component.hasResourceDetails(slurmUnit())).toBe(false);
+      expect(component.hasResourceDetails(localUnit())).toBe(false);
+      expect(component.hasResourceDetails(makeUnit())).toBe(true);
+    });
+
+    it("can be filtered on", () => {
+      expect(component.typeFilters).toContainEqual({ text: "Slurm", value: "slurm" });
+    });
+
+    it("has a terminate tooltip", () => {
+      expect(component.terminateTooltip(slurmUnit())).toBe("Terminate this computing unit");
+    });
+  });
+
   describe("isLocal", () => {
     it("is true only for local units", () => {
       expect(component.isLocal(localUnit())).toBe(true);

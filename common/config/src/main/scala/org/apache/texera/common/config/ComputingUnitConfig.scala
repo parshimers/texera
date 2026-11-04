@@ -26,4 +26,12 @@ object ComputingUnitConfig {
 
   val localComputingUnitEnabled: Boolean = conf.getBoolean("computing-unit.local.enabled")
   val sharingComputingUnitEnabled: Boolean = conf.getBoolean("computing-unit.sharing.enabled")
+
+  val slurmComputingUnitEnabled: Boolean = conf.getBoolean("computing-unit.slurm.enabled")
+  val slurmSocketPath: String = conf.getString("computing-unit.slurm.socket-path")
+  val slurmApiVersion: String = conf.getString("computing-unit.slurm.api-version")
+  val slurmJobJson: String = conf.getString("computing-unit.slurm.job-json")
+  val slurmUnitAddressTemplate: String =
+    conf.getString("computing-unit.slurm.unit-address-template")
+  val slurmRequestTimeoutSeconds: Int = conf.getInt("computing-unit.slurm.request-timeout-seconds")
 }

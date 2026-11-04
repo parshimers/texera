@@ -26,7 +26,7 @@ import jakarta.ws.rs.{
   ServiceUnavailableException
 }
 import jakarta.ws.rs.core.Response
-import org.apache.texera.common.config.EnvironmentalVariable
+import org.apache.texera.common.config.{EnvironmentalVariable, StorageConfig}
 import org.apache.texera.auth.SessionUser
 import org.apache.texera.common.config.KubernetesConfig.maxNumOfRunningComputingUnitsPerUser
 import org.apache.texera.dao.MockTexeraDB
@@ -634,14 +634,22 @@ class ComputingUnitManagingResourceSpec
   }
 
   "optionalComputingUnitEnv" should "forward an override that is set" in {
-    ComputingUnitManagingResource.optionalComputingUnitEnv(_ => Some("2048")) shouldBe
+    ComputingUnitManagingResource.optionalComputingUnitEnv(Map(payloadSize -> "2048").get) shouldBe
       Map(payloadSize -> "2048")
   }
 
   // HOCON refuses " 2048" as an int, and the unit then dies at startup naming nothing.
   it should "trim what it forwards" in {
-    ComputingUnitManagingResource.optionalComputingUnitEnv(_ => Some(" 2048\n")) shouldBe
-      Map(payloadSize -> "2048")
+    ComputingUnitManagingResource.optionalComputingUnitEnv(
+      Map(payloadSize -> " 2048\n").get
+    ) shouldBe Map(payloadSize -> "2048")
+  }
+
+  // Otherwise a unit demands a warehouse the deployment has turned off.
+  it should "forward the deployment's choice about warehouses" in {
+    ComputingUnitManagingResource.optionalComputingUnitEnv(
+      Map(StorageConfig.ENV_WAREHOUSE_ENABLED -> "false").get
+    ) shouldBe Map(StorageConfig.ENV_WAREHOUSE_ENABLED -> "false")
   }
 
   // application.conf already defaults this to 1024; forwarding "" would override the default

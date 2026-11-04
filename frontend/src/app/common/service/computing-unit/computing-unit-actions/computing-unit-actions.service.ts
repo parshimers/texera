@@ -86,12 +86,17 @@ export class ComputingUnitActionsService {
       return this.computingUnitService.createLocalComputingUnit(request.name, request.localUri);
     }
 
+    if (request.type === "slurm") {
+      return this.computingUnitService.createSlurmComputingUnit(request.name);
+    }
+
     throw new Error("Unsupported computing unit type");
   }
 
   /** Runs `onTerminated` once the unit is terminated, and not if the modal is cancelled or the termination fails. */
   confirmAndTerminate(cuid: number, unit: DashboardWorkflowComputingUnit, onTerminated?: () => void): void {
-    if (!unit.computingUnit.uri) {
+    // A Slurm unit has no URI until its job reaches a node, and can be terminated while it queues.
+    if (!unit.computingUnit.uri && unit.computingUnit.type !== "slurm") {
       this.notificationService.error("Invalid computing unit.");
       return;
     }

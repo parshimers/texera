@@ -1,0 +1,67 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+
+# ---------------------------------------------------------------------------
+# Example overlay for rootless k3s with Slurm on the same host, so that computing
+# units can run as Slurm jobs next to the cluster. Replace 192.0.2.10 with the
+# host's address:
+#
+#   sed 's/192.0.2.10/<host address>/' bin/k8s/values-slurm-rootless.yaml > slurm.yaml
+#   bin/k8s/install.sh -f slurm.yaml
+#
+# On the host, before installing: k3s started with --disable=traefik, which would
+# otherwise hold the gateway's port; slurmrestd running as uid 101000 on a socket in
+# /srv/slurmrestd; that uid existing on the Slurm nodes; and the contents of the
+# computing-unit image at /opt/texera, with a JRE at /opt/texera/jre and the amber
+# directory at /opt/texera/amber. See "Allocating computing units with Slurm" in
+# README.md, including what publishing these services exposes.
+# ---------------------------------------------------------------------------
+
+# k3s ships its own.
+metrics-server:
+  enabled: false
+
+workflowComputingUnitManager:
+  slurm:
+    enabled: true
+    clusterAddress: 192.0.2.10
+    # With Slurm on the k3s host, a unit is always at the host's address. Use {node} when Slurm has
+    # other nodes, and their names resolve from the gateway.
+    unitAddressTemplate: 192.0.2.10:8085
+    jobJson: |
+      {"job": {
+        "partition": "debug",
+        "shared": ["none"],
+        "cpus_per_task": 2,
+        "memory_per_node": {"set": true, "number": 3000},
+        "time_limit": {"set": true, "number": 240},
+        "current_working_directory": "/tmp",
+        "standard_output": "/tmp/texera-cu-%j.log",
+        "standard_error": "/tmp/texera-cu-%j.log",
+        "environment": [
+          "PATH=/opt/texera/jre/bin:/usr/bin:/bin",
+          "JAVA_HOME=/opt/texera/jre",
+          "JAVA_OPTS=-Xmx1g"
+        ],
+        "script": "#!/bin/bash\nD=/tmp/texera-cu-$TEXERA_CU_ID/amber\nmkdir -p \"$D/logs\" && cd \"$D\"\nfor f in /opt/texera/amber/*; do ln -sf \"$f\" .; done\nexec bin/computing-unit-master\n"
+      }}
+
+lakefs:
+  extraEnvVars:
+    - name: LAKEFS_BLOCKSTORE_S3_PRE_SIGNED_ENDPOINT
+      value: http://192.0.2.10:9000

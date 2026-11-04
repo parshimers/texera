@@ -31,6 +31,7 @@ describe("ComputingUnitActionsService", () => {
   let computingUnitService: {
     createKubernetesBasedComputingUnit: ReturnType<typeof vi.fn>;
     createLocalComputingUnit: ReturnType<typeof vi.fn>;
+    createSlurmComputingUnit: ReturnType<typeof vi.fn>;
   };
   let notificationService: { error: ReturnType<typeof vi.fn>; success: ReturnType<typeof vi.fn> };
   let statusService: { terminateComputingUnit: ReturnType<typeof vi.fn> };
@@ -51,6 +52,7 @@ describe("ComputingUnitActionsService", () => {
     computingUnitService = {
       createKubernetesBasedComputingUnit: vi.fn().mockReturnValue(of({} as any)),
       createLocalComputingUnit: vi.fn().mockReturnValue(of({} as any)),
+      createSlurmComputingUnit: vi.fn().mockReturnValue(of({} as any)),
     };
     notificationService = { error: vi.fn(), success: vi.fn() };
     statusService = { terminateComputingUnit: vi.fn().mockReturnValue(of(true)) };
@@ -85,6 +87,14 @@ describe("ComputingUnitActionsService", () => {
         // No curated image chosen, so the unit runs the deployment's own.
         undefined
       );
+      expect(computingUnitService.createLocalComputingUnit).not.toHaveBeenCalled();
+    });
+
+    it("routes a slurm request to createSlurmComputingUnit with only the name", () => {
+      service.create({ ...baseRequest, type: "slurm" });
+
+      expect(computingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("unit");
+      expect(computingUnitService.createKubernetesBasedComputingUnit).not.toHaveBeenCalled();
       expect(computingUnitService.createLocalComputingUnit).not.toHaveBeenCalled();
     });
 
@@ -125,6 +135,15 @@ describe("ComputingUnitActionsService", () => {
 
       expect(notificationService.error).toHaveBeenCalledWith("Invalid computing unit.");
       expect(modalService.confirm).not.toHaveBeenCalled();
+    });
+
+    it("still lets a slurm unit be terminated while it queues with no uri", () => {
+      service.confirmAndTerminate(1, unit({ uri: "", type: "slurm" }));
+
+      expect(notificationService.error).not.toHaveBeenCalled();
+      const config = modalService.confirm.mock.calls[0][0];
+      expect(config.nzOkText).toBe("Terminate");
+      expect(config.nzContent).toContain("All execution results");
     });
 
     it("opens a confirmation modal for a valid unit", () => {
@@ -200,7 +219,7 @@ describe("ComputingUnitActionsService", () => {
       const markup = '<a href="https://evil.example">Confirm</a> & <b>x</b>';
       const escaped = "&lt;a href=&quot;https://evil.example&quot;&gt;Confirm&lt;/a&gt; &amp; &lt;b&gt;x&lt;/b&gt;";
 
-      it.each(["kubernetes", "local"])("is escaped in the confirmation modal of a %s unit", type => {
+      it.each(["kubernetes", "local", "slurm"])("is escaped in the confirmation modal of a %s unit", type => {
         service.confirmAndTerminate(7, unit({ type, name: markup }));
 
         expect(modalService.confirm.mock.calls[0][0].nzContent).toContain(escaped);

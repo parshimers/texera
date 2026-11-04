@@ -169,6 +169,11 @@
         <sqlFile path="sql/updates/51.sql"/>
     </changeSet>
 
+    <!-- Allow computing units allocated as Slurm jobs -->
+    <changeSet id="52" author="parshimers">
+        <sqlFile path="sql/updates/52.sql"/>
+    </changeSet>
+
     <!-- example changeSet
     <changeSet id="1" author="author">
         <sqlFile path="sql/updates/1.sql"/>

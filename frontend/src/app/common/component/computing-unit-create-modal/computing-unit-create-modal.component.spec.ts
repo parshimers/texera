@@ -68,6 +68,7 @@ describe("ComputingUnitCreateModalComponent", () => {
       getComputingUnitLimitOptions: vi.fn(),
       createKubernetesBasedComputingUnit: vi.fn(),
       createLocalComputingUnit: vi.fn(),
+      createSlurmComputingUnit: vi.fn(),
     } as unknown as Mocked<WorkflowComputingUnitManagingService>;
     mockComputingUnitService.getComputingUnitTypes.mockReturnValue(of({ typeOptions: [] }));
     mockComputingUnitService.getComputingUnitLimitOptions.mockReturnValue(
@@ -75,6 +76,7 @@ describe("ComputingUnitCreateModalComponent", () => {
     );
     mockComputingUnitService.createKubernetesBasedComputingUnit.mockReturnValue(of(createdUnit));
     mockComputingUnitService.createLocalComputingUnit.mockReturnValue(of(createdUnit));
+    mockComputingUnitService.createSlurmComputingUnit.mockReturnValue(of(createdUnit));
 
     mockNotificationService = {
       success: vi.fn(),
@@ -235,6 +237,43 @@ describe("ComputingUnitCreateModalComponent", () => {
     expect(mockNotificationService.error).toHaveBeenCalledWith("Name of the computing unit cannot be empty");
     expect(mockComputingUnitService.createKubernetesBasedComputingUnit).not.toHaveBeenCalled();
     expect(visibleSpy).toHaveBeenCalledWith(false);
+  });
+
+  it("rejects a slurm create with an empty name", () => {
+    fixture.detectChanges();
+    component.selectedComputingUnitType = "slurm";
+    component.newComputingUnitName = "   ";
+
+    component.startComputingUnit();
+
+    expect(mockNotificationService.error).toHaveBeenCalledWith("Name of the computing unit cannot be empty");
+    expect(mockComputingUnitService.createSlurmComputingUnit).not.toHaveBeenCalled();
+  });
+
+  it("creates a slurm unit from its name, and offers no resource choices for it", () => {
+    mockComputingUnitService.getComputingUnitTypes.mockReturnValue(of({ typeOptions: ["slurm"] }));
+    mockComputingUnitService.getComputingUnitLimitOptions.mockReturnValue(
+      of({ cpuLimitOptions: ["1"], memoryLimitOptions: ["1Gi"], gpuLimitOptions: ["0"] })
+    );
+    openDialog();
+    expect(component.selectedComputingUnitType).toBe("slurm");
+    expect(component.getCreateModalTitle()).toBe("Create Slurm Computing Unit");
+
+    const modalBody = document.querySelector(".create-compute-unit-container") as HTMLElement;
+    expect(modalBody.querySelector(".unit-name-input")).not.toBeNull();
+    expect(modalBody.querySelector(".slurm-hint")).not.toBeNull();
+    expect(modalBody.querySelector(".memory-selection")).toBeNull();
+    expect(modalBody.querySelector(".cpu-selection")).toBeNull();
+    expect(modalBody.querySelector(".unit-uri-input")).toBeNull();
+
+    const created = vi.fn();
+    component.unitCreated.subscribe(created);
+    component.newComputingUnitName = "hpc";
+    component.handleAddComputeUnitModalOk();
+
+    expect(mockComputingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("hpc");
+    expect(mockNotificationService.success).toHaveBeenCalled();
+    expect(created).toHaveBeenCalledWith(createdUnit);
   });
 
   it("rejects a local create with a blank URI", () => {

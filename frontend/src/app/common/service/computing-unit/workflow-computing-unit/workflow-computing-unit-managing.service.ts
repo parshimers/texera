@@ -79,7 +79,7 @@ export class WorkflowComputingUnitManagingService {
    * @param memoryLimit The memory resource limit for the computing unit.
    * @param gpuLimit The gpu resource limit for the computing unit.
    * @param jvmMemorySize The JVM memory size (e.g. "1G", "2G")
-   * @param unitType The type of computing unit (e.g. "local", "kubernetes")
+   * @param unitType The type of computing unit (e.g. "local", "kubernetes", "slurm")
    * @param shmSize The shared memory size
    * @param uri The URI of the local computing unit; for kubernetes-based computing units, this is not used in the backend.
    * @returns An Observable of the created WorkflowComputingUnit.
@@ -92,7 +92,7 @@ export class WorkflowComputingUnitManagingService {
     jvmMemorySize: string,
     shmSize: string,
     uri: string,
-    unitType: "kubernetes" | "local",
+    unitType: WorkflowComputingUnitType,
     iid?: number
   ): Observable<DashboardWorkflowComputingUnit> {
     // iid is left out when no curated image was chosen, so the unit runs the deployment's
@@ -146,6 +146,17 @@ export class WorkflowComputingUnitManagingService {
    */
   public createLocalComputingUnit(name: string, uri: string): Observable<DashboardWorkflowComputingUnit> {
     return this.createComputingUnit(name, "NaN", "NaN", "NaN", "NaN", "NaN", uri, "local");
+  }
+
+  /**
+   * Create a workflow computing unit allocated as a Slurm job. The administrator's job JSON decides
+   * its resources, so a name is all there is to choose.
+   *
+   * @param name The name of the computing unit.
+   * @returns An Observable of the created WorkflowComputingUnit.
+   */
+  public createSlurmComputingUnit(name: string): Observable<DashboardWorkflowComputingUnit> {
+    return this.createComputingUnit(name, "NaN", "NaN", "NaN", "NaN", "NaN", "", "slurm");
   }
 
   /**

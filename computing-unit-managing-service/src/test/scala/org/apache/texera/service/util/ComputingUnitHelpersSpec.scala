@@ -899,4 +899,116 @@ class ComputingUnitHelpersSpec
     live.map(_.getCuid) shouldBe List(611)
     computingUnitDao.fetchOneByCuid(611).getTerminateTime shouldBe null
   }
+
+  private def slurmJob(
+      states: Set[String],
+      node: Option[String] = None,
+      reason: Option[String] = None
+  ) = Some(SlurmJobFound(SlurmJobSnapshot(states, node, reason)))
+
+  "slurmStatusAndReason" should "map a job holding its node to Running" in {
+    ComputingUnitHelpers.slurmStatusAndReason(
+      slurmJob(Set("RUNNING"), Some("node-1"))
+    ) shouldBe ((Running, None))
+  }
+
+  it should "keep a job Pending until it has a node that finished booting" in {
+    ComputingUnitHelpers.slurmStatusAndReason(
+      slurmJob(Set("RUNNING", "CONFIGURING"), Some("node-1"))
+    ) shouldBe ((Pending, None))
+    ComputingUnitHelpers.slurmStatusAndReason(slurmJob(Set("RUNNING"))) shouldBe ((Pending, None))
+  }
+
+  it should "report what a queued job waits for" in {
+    val (state, reason) =
+      ComputingUnitHelpers.slurmStatusAndReason(
+        slurmJob(Set("PENDING"), reason = Some("Resources"))
+      )
+    state shouldBe Pending
+    reason.get should include("Resources")
+  }
+
+  it should "report a suspended job as Pending with a reason" in {
+    val (state, reason) = ComputingUnitHelpers.slurmStatusAndReason(slurmJob(Set("SUSPENDED")))
+    state shouldBe Pending
+    reason shouldBe defined
+  }
+
+  it should "report a job on its way out as Terminating, whatever its base state" in {
+    Seq(
+      Set("RUNNING", "COMPLETING"),
+      Set("COMPLETED", "COMPLETING"),
+      Set("CANCELLED", "COMPLETING")
+    )
+      .foreach { states =>
+        ComputingUnitHelpers.slurmStatusAndReason(
+          slurmJob(states, Some("node-1"))
+        ) shouldBe ((Terminating, None))
+      }
+  }
+
+  it should "report every way a job ends as Failed, saying which" in {
+    Seq(
+      "OUT_OF_MEMORY" -> "memory",
+      "TIMEOUT" -> "time limit",
+      "DEADLINE" -> "time limit",
+      "NODE_FAIL" -> "node",
+      "BOOT_FAIL" -> "node",
+      "PREEMPTED" -> "preempted",
+      "CANCELLED" -> "cancelled",
+      "COMPLETED" -> "exited",
+      "FAILED" -> "failed"
+    ).foreach {
+      case (slurmState, wording) =>
+        withClue(slurmState) {
+          val (state, reason) =
+            ComputingUnitHelpers.slurmStatusAndReason(slurmJob(Set(slurmState), Some("node-1")))
+          state shouldBe Failed
+          reason.get should include(wording)
+        }
+    }
+  }
+
+  it should "report a state it does not know as Pending rather than dead" in {
+    ComputingUnitHelpers.slurmStatusAndReason(slurmJob(Set("SOME_FUTURE_STATE"))) shouldBe
+      ((Pending, None))
+  }
+
+  it should "report an unanswered lookup as Unknown and a vanished job as Failed" in {
+    ComputingUnitHelpers.slurmStatusAndReason(Some(SlurmJobUnavailable("down")))._1 shouldBe Unknown
+    ComputingUnitHelpers.slurmStatusAndReason(Some(SlurmJobGone))._1 shouldBe Failed
+    ComputingUnitHelpers.slurmStatusAndReason(None) shouldBe ((Pending, None))
+  }
+
+  private def slurmUnit(resource: String) = {
+    val unit = new WorkflowComputingUnit()
+    unit.setCuid(5)
+    unit.setType(WorkflowComputingUnitTypeEnum.slurm)
+    unit.setResource(resource)
+    unit
+  }
+
+  "slurmJobId" should "read the id from the resource, and tolerate a resource without one" in {
+    ComputingUnitHelpers.slurmJobId(slurmUnit("""{"slurmJobId":42}""")) shouldBe Some(42L)
+    ComputingUnitHelpers.slurmJobId(slurmUnit("""{"cpuLimit":"NaN"}""")) shouldBe None
+    ComputingUnitHelpers.slurmJobId(slurmUnit("not json")) shouldBe None
+    ComputingUnitHelpers.slurmJobId(slurmUnit(null)) shouldBe None
+  }
+
+  "slurmJobsFor" should "never force the client when no Slurm unit is present" in {
+    val local = new WorkflowComputingUnit()
+    local.setCuid(6)
+    local.setType(WorkflowComputingUnitTypeEnum.local)
+    ComputingUnitHelpers.slurmJobsFor(
+      Seq(local),
+      throw new AssertionError("the client must not be forced")
+    ) shouldBe empty
+  }
+
+  it should "treat a unit with no recorded job as gone, as nothing of it can be running" in {
+    ComputingUnitHelpers.slurmJobsFor(
+      Seq(slurmUnit("{}")),
+      new SlurmRestClient((_, _, _) => throw new AssertionError("no request expected"), "v0.0.42")
+    ) shouldBe Map(Integer.valueOf(5) -> SlurmJobGone)
+  }
 }

@@ -689,5 +689,22 @@ describe("DownloadService", () => {
       const form = document.querySelector('form[target="download-iframe"]') as HTMLFormElement;
       expect(form.getAttribute("action")).toBe(`${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/local?cuid=9`);
     });
+
+    // The gateway finds a Slurm unit by this parameter, exactly as it does a pod.
+    it("addresses a slurm unit by its cuid", () => {
+      downloadService.exportWorkflowResultToLocal(
+        "csv",
+        1,
+        "WF",
+        EXPORT_OPERATORS,
+        0,
+        0,
+        "out.csv",
+        computingUnit("slurm", 9)
+      );
+
+      const form = document.querySelector('form[target="download-iframe"]') as HTMLFormElement;
+      expect(form.getAttribute("action")).toBe(`${WORKFLOW_EXECUTIONS_API_BASE_URL}/${EXPORT_BASE_URL}/local?cuid=9`);
+    });
   });
 });

@@ -29,10 +29,48 @@ services fall back to the in-cluster RustFS Service and its auto-generated
 
 {{/* S3 endpoint URL. */}}
 {{- define "texera.s3.endpoint" -}}
+{{- $clusterAddress := include "texera.slurm.clusterAddress" . -}}
 {{- if .Values.storage.s3.endpoint -}}
 {{- .Values.storage.s3.endpoint -}}
+{{- else if and $clusterAddress .Values.rustfs.enabled -}}
+{{- /* Every client shares this one: Lakekeeper hands the warehouse's endpoint to whoever reads a
+       table, a Slurm unit included, so the unit cannot be given a different one of its own. */ -}}
+{{- printf "http://%s:9000" $clusterAddress -}}
 {{- else -}}
 {{- printf "http://%s-rustfs-svc:9000" .Release.Name -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Where Slurm nodes reach this cluster's services; empty unless they are to be published. */}}
+{{- define "texera.slurm.clusterAddress" -}}
+{{- $slurm := .Values.workflowComputingUnitManager.slurm -}}
+{{- if $slurm.enabled -}}
+{{- $slurm.clusterAddress -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The administrator's job JSON, with the published addresses added to job.environment. They go first
+because the manager keeps the last entry for a name, which leaves the administrator's own winning.
+*/}}
+{{- define "texera.slurm.jobJson" -}}
+{{- $slurm := .Values.workflowComputingUnitManager.slurm -}}
+{{- $address := include "texera.slurm.clusterAddress" . -}}
+{{- if $address -}}
+{{- $body := mustFromJson $slurm.jobJson -}}
+{{- $job := required "workflowComputingUnitManager.slurm.jobJson has no \"job\" object" $body.job -}}
+{{- $fileService := printf "http://%s:%v/api" $address .Values.fileService.service.port -}}
+{{- $published := list
+      (printf "STORAGE_JDBC_URL=jdbc:postgresql://%s:5432/texera_db?currentSchema=texera_db,public" $address)
+      (printf "STORAGE_ICEBERG_CATALOG_REST_URI=http://%s:%v/catalog" $address .Values.lakekeeper.catalog.service.externalPort)
+      (printf "STORAGE_LAKEFS_ENDPOINT=http://%s:%v/api/v1" $address .Values.lakefs.service.port)
+      (printf "FILE_SERVICE_GET_DATASET_PRESIGNED_URL_ENDPOINT=%s/dataset/presign-download" $fileService)
+      (printf "FILE_SERVICE_GET_MODEL_PRESIGNED_URL_ENDPOINT=%s/model/presign-download" $fileService)
+      (printf "FILE_SERVICE_UPLOAD_ONE_FILE_TO_DATASET_ENDPOINT=%s/dataset/did/upload" $fileService) -}}
+{{- $_ := set $job "environment" (concat $published ($job.environment | default list)) -}}
+{{- mustToRawJson $body -}}
+{{- else -}}
+{{- $slurm.jobJson -}}
 {{- end -}}
 {{- end -}}
 

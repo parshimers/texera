@@ -63,6 +63,23 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-lakefs-secret
                   key: secret_key
+            # S3 Access: a warehouse a user creates is given this endpoint and these credentials
+            - name: STORAGE_S3_ENDPOINT
+              value: {{ include "texera.s3.endpoint" . }}
+            {{- if .Values.storage.s3.endpoint }}
+            - name: STORAGE_S3_REGION
+              value: {{ .Values.storage.s3.region | quote }}
+            {{- end }}
+            - name: STORAGE_S3_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "texera.s3.secretName" . }}
+                  key: {{ include "texera.s3.accessKeyIdKey" . }}
+            - name: STORAGE_S3_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "texera.s3.secretName" . }}
+                  key: {{ include "texera.s3.secretAccessKeyKey" . }}
             # Workflow Result (Lakekeeper REST catalog)
             - name: STORAGE_ICEBERG_CATALOG_TYPE
               value: rest

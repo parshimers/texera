@@ -2751,6 +2751,13 @@ describe("PowerButtonComponent", () => {
       expect((await openMetrics()).names).toEqual(["CPU", "RAM"]);
     });
 
+    it("shows no metric bars for a slurm unit, which reports no usage", () => {
+      component.selectedComputingUnit = makeComputingUnit({ cuid: 5, type: "slurm" });
+      fixture.detectChanges();
+
+      expect(fixture.debugElement.query(By.css("#metrics-container-id"))).toBeNull();
+    });
+
     it("has no popover content to show while no unit is selected", () => {
       component.selectedComputingUnit = null;
       fixture.detectChanges();

@@ -44,6 +44,12 @@ command -v helm >/dev/null 2>&1 || { echo "helm not found on PATH" >&2; exit 1; 
 # lock yet. Both are safe to re-run.
 echo "==> Resolving chart dependencies"
 if [ -f "${CHART_DIR}/Chart.lock" ]; then
+  # Unlike `dependency update`, `dependency build` refuses a repository helm has
+  # not been told about. Helm matches on the URL, so the name is only made unique.
+  awk '$1 == "repository:" && $2 ~ /^https?:/ { print $2 }' "${CHART_DIR}/Chart.lock" | sort -u |
+    while read -r url; do
+      helm repo add "texera-$(printf '%s' "${url}" | cksum | cut -d' ' -f1)" "${url}" --force-update >/dev/null
+    done
   helm dependency build "${CHART_DIR}"
 else
   helm dependency update "${CHART_DIR}"

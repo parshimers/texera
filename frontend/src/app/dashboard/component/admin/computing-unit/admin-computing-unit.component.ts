@@ -124,6 +124,7 @@ export class AdminComputingUnitComponent implements OnInit {
   readonly typeFilters = [
     { text: "Kubernetes", value: "kubernetes" },
     { text: "Local", value: "local" },
+    { text: "Slurm", value: "slurm" },
   ];
   // Every reportable status, so an admin can filter to the `Failed` ones, but not the `NoComputingUnit` sentinel.
   readonly statusFilters = Object.values(ComputingUnitState)
@@ -198,6 +199,11 @@ export class AdminComputingUnitComponent implements OnInit {
     return unit.computingUnit.type === "local";
   }
 
+  /** Only a pod has limits and usage to expand into; a Slurm job's are in its job JSON. */
+  hasResourceDetails(unit: DashboardWorkflowComputingUnit): boolean {
+    return unit.computingUnit.type === "kubernetes";
+  }
+
   /** Confirms the termination, then drops the row at once instead of at the next poll. */
   terminate(unit: DashboardWorkflowComputingUnit): void {
     const cuid = unit.computingUnit.cuid;
@@ -219,6 +225,9 @@ export class AdminComputingUnitComponent implements OnInit {
   resourceSummary(unit: DashboardWorkflowComputingUnit): string {
     if (this.isLocal(unit)) {
       return "Local — no limits";
+    }
+    if (unit.computingUnit.type === "slurm") {
+      return "Slurm — set by the job JSON";
     }
     const { cpuLimit, memoryLimit, gpuLimit } = unit.computingUnit.resource;
     const parts: string[] = [];

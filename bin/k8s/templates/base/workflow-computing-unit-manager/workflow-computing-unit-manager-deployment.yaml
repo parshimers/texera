@@ -15,6 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 
+{{- $slurm := .Values.workflowComputingUnitManager.slurm }}
+{{- if $slurm.enabled }}
+{{- $_ := required "workflowComputingUnitManager.slurm.jobJson is required when Slurm is enabled" $slurm.jobJson | mustFromJson }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,6 +40,17 @@ spec:
       runtimeClassName: {{ .Values.global.texeraMicroServiceRuntimeClass | quote }}
       {{- end }}      
       serviceAccountName: {{ .Values.workflowComputingUnitManager.serviceAccountName }}
+      {{- if $slurm.enabled }}
+      {{- with $slurm.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: slurmrestd-socket
+          hostPath:
+            path: {{ $slurm.socketHostDir | quote }}
+            type: Directory
+      {{- end }}
       initContainers:
         - name: wait-lakekeeper
           image: curlimages/curl:8.22.0
@@ -59,9 +74,30 @@ spec:
         - name: {{ .Values.workflowComputingUnitManager.name }}
           image: {{ .Values.texera.imageRegistry }}/{{ .Values.workflowComputingUnitManager.imageName }}:{{ .Values.texera.imageTag }}
           imagePullPolicy: {{ .Values.texeraImages.pullPolicy }}
+          {{- if $slurm.enabled }}
+          securityContext:
+            runAsUser: {{ $slurm.runAsUser }}
+            runAsGroup: {{ $slurm.runAsGroup }}
+          volumeMounts:
+            - name: slurmrestd-socket
+              mountPath: /var/run/slurmrestd
+              readOnly: true
+          {{- end }}
           ports:
             - containerPort: {{ .Values.workflowComputingUnitManager.service.port }}
           env:
+            - name: COMPUTING_UNIT_SLURM_ENABLED
+              value: "{{ $slurm.enabled }}"
+            {{- if $slurm.enabled }}
+            - name: COMPUTING_UNIT_SLURM_SOCKET_PATH
+              value: {{ printf "/var/run/slurmrestd/%s" $slurm.socketFileName | quote }}
+            - name: COMPUTING_UNIT_SLURM_API_VERSION
+              value: {{ $slurm.apiVersion | quote }}
+            - name: COMPUTING_UNIT_SLURM_JOB_JSON
+              value: {{ include "texera.slurm.jobJson" . | quote }}
+            - name: COMPUTING_UNIT_SLURM_UNIT_ADDRESS_TEMPLATE
+              value: {{ $slurm.unitAddressTemplate | quote }}
+            {{- end }}
             # Kubernetes related variables
             - name: KUBERNETES_COMPUTE_UNIT_POOL_NAMESPACE
               value: {{ .Values.workflowComputingUnitPool.namespace }}

@@ -392,4 +392,15 @@ export const unitTypeMessageTemplate = {
     terminateFailure: "Failed to terminate Kubernetes computing unit",
     terminateTooltip: "Terminate this computing unit",
   },
+  slurm: {
+    createTitle: "Create Slurm Computing Unit",
+    terminateTitle: "Terminate Computing Unit",
+    terminateWarning:
+      "<p style='color: #ff4d4f;'><strong>Warning:</strong> All execution results in this computing unit will be lost.</p>",
+    createSuccess: "Successfully submitted the Slurm computing unit",
+    createFailure: "Failed to submit the Slurm computing unit",
+    terminateSuccess: "Terminated Slurm computing unit",
+    terminateFailure: "Failed to terminate Slurm computing unit",
+    terminateTooltip: "Terminate this computing unit",
+  },
 } as const;

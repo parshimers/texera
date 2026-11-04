@@ -220,6 +220,25 @@
         </div>
       </ng-container>
 
+      <!-- Fields for Slurm computing units: the administrator's job JSON decides the rest -->
+      <ng-container *ngIf="selectedComputingUnitType === 'slurm'">
+        <div class="select-unit name-field">
+          <span>Computing Unit Name</span>
+          <input
+            [required]="true"
+            nz-input
+            placeholder="Enter the name of your computing unit (required)"
+            [(ngModel)]="newComputingUnitName"
+            class="unit-name-input" />
+        </div>
+        <nz-alert
+          class="slurm-hint"
+          nzType="info"
+          nzMessage="Runs as a job on the Slurm cluster, with the resources your administrator configured. It starts once Slurm has allocated them."
+          nzShowIcon>
+        </nz-alert>
+      </ng-container>
+
       <!-- Fields for Local computing units -->
       <ng-container *ngIf="selectedComputingUnitType === 'local'">
         <div class="select-unit name-field">

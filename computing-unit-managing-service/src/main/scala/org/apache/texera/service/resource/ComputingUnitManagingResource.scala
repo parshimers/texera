@@ -66,7 +66,9 @@ import org.apache.texera.service.util.{
   ComputingUnitHelpers,
   ComputingUnitManagingServiceException,
   InsufficientComputingUnitQuota,
-  KubernetesClient
+  KubernetesClient,
+  SlurmJobRequest,
+  SlurmRestClient
 }
 import org.jooq.{Condition, DSLContext, EnumType}
 import org.jooq.impl.DSL.{boolOr, exists, max, selectOne}
@@ -349,7 +351,10 @@ object ComputingUnitManagingResource {
   // their conf keys went away with #3831 and #3542, so nothing reads them.
   // TODO: use AmberConfig here; it is only accessible in workflow-executing-service
   private val optionalComputingUnitEnvNames: Seq[String] = Seq(
-    EnvironmentalVariable.ENV_MAX_WORKFLOW_WEBSOCKET_REQUEST_PAYLOAD_SIZE_KB
+    EnvironmentalVariable.ENV_MAX_WORKFLOW_WEBSOCKET_REQUEST_PAYLOAD_SIZE_KB,
+    // Without it, a unit in a deployment that turned warehouses off still demands one, and every
+    // execution fails to compile with "a warehouse must be selected".
+    StorageConfig.ENV_WAREHOUSE_ENABLED
   )
 
   /**
@@ -506,7 +511,14 @@ object ComputingUnitManagingResource {
 @Path("/computing-unit")
 class ComputingUnitManagingResource(
     notifyOwnerOfAdminTermination: (WorkflowComputingUnit, User) => Unit =
-      ComputingUnitEmailNotifier.notifyOwnerOfAdminTermination
+      ComputingUnitEmailNotifier.notifyOwnerOfAdminTermination,
+    // Parameters rather than direct reads because the config is fixed at load time, so the spec
+    // could otherwise never reach the Slurm path. The client and the environment are by-name:
+    // the environment fails on a deployment missing required variables, which only matters here.
+    slurmEnabled: Boolean = ComputingUnitConfig.slurmComputingUnitEnabled,
+    slurmJobJson: String = ComputingUnitConfig.slurmJobJson,
+    slurm: => SlurmRestClient = SlurmRestClient,
+    slurmUnitEnv: => Map[String, Any] = computingUnitEnvironmentVariables
 ) {
   private def getComputingUnitByCuid(ctx: DSLContext, cuid: Int): WorkflowComputingUnit = {
     val wcDao = new WorkflowComputingUnitDao(ctx.configuration())
@@ -527,6 +539,7 @@ class ComputingUnitManagingResource(
     allTypes.filter {
       case "local"      => ComputingUnitConfig.localComputingUnitEnabled
       case "kubernetes" => KubernetesConfig.kubernetesComputingUnitEnabled
+      case "slurm"      => slurmEnabled
       case _            => false // Any unknown types are disabled by default
     }
   }
@@ -535,7 +548,7 @@ class ComputingUnitManagingResource(
       unit: WorkflowComputingUnit
   ): WorkflowComputingUnitResourceLimit = {
     unit.getType match {
-      case WorkflowComputingUnitTypeEnum.local =>
+      case WorkflowComputingUnitTypeEnum.local | WorkflowComputingUnitTypeEnum.slurm =>
         WorkflowComputingUnitResourceLimit("NaN", "NaN", "NaN")
       case WorkflowComputingUnitTypeEnum.kubernetes =>
         val podLimits: Map[String, String] = KubernetesClient.getPodLimits(unit.getCuid)
@@ -660,6 +673,11 @@ class ComputingUnitManagingResource(
         if (param.uri.forall(_.trim.isEmpty))
           throw new ForbiddenException("URI is required for local computing units")
 
+      // The job JSON decides everything a Kubernetes unit asks of its user, including what runs.
+      case WorkflowComputingUnitTypeEnum.slurm =>
+        if (param.iid.isDefined)
+          throw new ForbiddenException("Slurm computing units cannot start from a curated image.")
+
       // Anything else (shouldn't happen if you keep supported types in sync)
       case _ =>
         throw new ForbiddenException(s"Unsupported computing-unit type: ${param.unitType}")
@@ -686,7 +704,7 @@ class ComputingUnitManagingResource(
         .filter(_.getTerminateTime == null) // Filter out terminated units
 
       if (
-        units.size >= maxNumOfRunningComputingUnitsPerUser && cuType == WorkflowComputingUnitTypeEnum.kubernetes
+        units.size >= maxNumOfRunningComputingUnitsPerUser && cuType != WorkflowComputingUnitTypeEnum.local
       ) {
         throw InsufficientComputingUnitQuota(maxNumOfRunningComputingUnitsPerUser)
       }
@@ -708,6 +726,19 @@ class ComputingUnitManagingResource(
               "imageName" -> param.iid.flatMap(CuratedImageResource.nameOf),
               "curatedImage" -> curatedImage,
               "nodeAddresses" -> Json.arr() // filled in later
+            )
+          )
+
+        // ── Slurm CU ─────────────────────────────────────────────
+        case WorkflowComputingUnitTypeEnum.slurm =>
+          Json.stringify(
+            Json.obj(
+              "cpuLimit" -> "NaN",
+              "memoryLimit" -> "NaN",
+              "gpuLimit" -> "NaN",
+              "jvmMemorySize" -> "NaN",
+              "shmSize" -> "NaN",
+              "nodeAddresses" -> Json.arr() // filled in once the job reaches a node
             )
           )
 
@@ -792,9 +823,29 @@ class ComputingUnitManagingResource(
         }
       }
 
+      if (cuType == WorkflowComputingUnitTypeEnum.slurm && insertedUnit != null) {
+        val jobId = slurm.submitJob(
+          SlurmJobRequest.build(
+            slurmJobJson,
+            cuid,
+            slurmUnitEnv ++ observabilityComputingUnitEnv(cuid, EnvironmentalVariable.get),
+            Map(
+              EnvironmentalVariable.ENV_CU_ID -> cuid,
+              EnvironmentalVariable.ENV_USER_JWT_TOKEN -> userToken
+            )
+          )
+        )
+        insertedUnit.setResource(
+          Json.stringify(
+            Json.parse(insertedUnit.getResource).as[JsObject] ++ Json.obj("slurmJobId" -> jobId)
+          )
+        )
+        wcDao.update(insertedUnit)
+      }
+
       // The creator is always the owner, so the status reason is never withheld here.
       val (status, statusReason) =
-        ComputingUnitHelpers.getComputingUnitStatusWithReason(insertedUnit)
+        ComputingUnitHelpers.reconcileAndGetStatusWithReason(wcDao, insertedUnit, slurm)
       DashboardWorkflowComputingUnit(
         insertedUnit,
         status.toString,
@@ -866,12 +917,18 @@ class ComputingUnitManagingResource(
 
       // Pod snapshots decide which Kubernetes units are still alive (by pod-name presence).
       val podSnapshots = ComputingUnitHelpers.podSnapshotsFor(candidateUnits)
+      val slurmJobs = ComputingUnitHelpers.slurmJobsFor(candidateUnits, slurm)
 
       val liveUnits =
-        ComputingUnitHelpers.reconcileVanishedKubernetesUnits(
+        ComputingUnitHelpers.reconcileSlurmUnits(
           computingUnitDao,
-          candidateUnits,
-          podSnapshots
+          ComputingUnitHelpers.reconcileVanishedKubernetesUnits(
+            computingUnitDao,
+            candidateUnits,
+            podSnapshots
+          ),
+          slurmJobs,
+          slurm
         )
 
       // Metrics only for survivors, so fetch after reconciliation.
@@ -889,7 +946,8 @@ class ComputingUnitManagingResource(
           accessPrivilege = privilegeByCuid(unit.getCuid),
           ownerInfo = ownerInfoMap,
           podSnapshots = podSnapshots,
-          podMetrics = podMetrics
+          podMetrics = podMetrics,
+          slurmJobs = slurmJobs
         )
       }
     }
@@ -919,7 +977,11 @@ class ComputingUnitManagingResource(
       ownerUser.flatMap(u => Option(u.getName).filter(_.nonEmpty)).orNull
 
     val isOwner = unit.getUid.equals(user.getUid)
-    val (status, statusReason) = ComputingUnitHelpers.getComputingUnitStatusWithReason(unit)
+    val (status, statusReason) = ComputingUnitHelpers.reconcileAndGetStatusWithReason(
+      new WorkflowComputingUnitDao(context.configuration()),
+      unit,
+      slurm
+    )
 
     DashboardWorkflowComputingUnit(
       computingUnit = unit,
@@ -967,6 +1029,9 @@ class ComputingUnitManagingResource(
       // if the computing unit is kubernetes pod, then kill the pod
       if (unit.getType == WorkflowComputingUnitTypeEnum.kubernetes) {
         KubernetesClient.deletePod(cuid)
+      }
+      if (unit.getType == WorkflowComputingUnitTypeEnum.slurm) {
+        ComputingUnitHelpers.slurmJobId(unit).foreach(slurm.cancelJob)
       }
 
       val terminationReason = WorkflowComputingUnitTerminationReasonEnum.USER_REQUESTED
