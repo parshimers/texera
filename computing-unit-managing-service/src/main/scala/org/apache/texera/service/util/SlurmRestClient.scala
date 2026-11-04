@@ -26,6 +26,7 @@ import play.api.libs.json._
 import java.io.IOException
 import java.nio.file.Paths
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import scala.util.Try
 
 /** What slurmrestd reports about a job, reduced to what decides a unit's status. */
@@ -43,6 +44,53 @@ case object SlurmJobGone extends SlurmJobLookup
 
 /** No answer that says anything about the job, so its unit must not be treated as dead. */
 final case class SlurmJobUnavailable(detail: String) extends SlurmJobLookup
+
+/** The unit's token was refused or is gone, so nothing is known about its job until it ends. */
+case object SlurmTokenUnusable extends SlurmJobLookup
+
+/**
+  * A user's own slurmrestd identity, for a slurmrestd using rest_auth/jwt.
+  *
+  * Only `parse` can make one, because these go verbatim into the headers of a hand-written HTTP
+  * request: a line break in either would let a user add headers or smuggle a request.
+  */
+final class SlurmCredentials private (val userName: String, val token: String) {
+  def headers: Seq[(String, String)] =
+    Seq("X-SLURM-USER-NAME" -> userName, "X-SLURM-USER-TOKEN" -> token)
+
+  override def toString: String = s"SlurmCredentials($userName)"
+}
+
+object SlurmCredentials {
+  private val ValidUserName = "[\\x21-\\x7E]{1,256}".r
+  private val ValidToken = "[A-Za-z0-9._-]{1,8192}".r
+
+  /** None when both are blank, meaning the unit authenticates through rest_auth/local. */
+  def parse(userName: Option[String], token: Option[String]): Option[SlurmCredentials] = {
+    def entered(value: Option[String]) = value.map(_.trim).filter(_.nonEmpty)
+    (entered(userName), entered(token)) match {
+      case (None, None) => None
+      case (Some(ValidUserName()), Some(ValidToken())) =>
+        Some(new SlurmCredentials(entered(userName).get, entered(token).get))
+      case (Some(_), Some(_)) =>
+        throw InvalidSlurmCredentials("The Slurm user name or token has invalid characters.")
+      case _ =>
+        throw InvalidSlurmCredentials("Provide both a Slurm user name and a token, or neither.")
+    }
+  }
+}
+
+/**
+  * The credentials of running units, in memory only. They are not written to the database or the
+  * job, so a restart of this service loses them and those units' jobs can no longer be managed.
+  */
+object SlurmCredentialStore {
+  private val byCuid = new ConcurrentHashMap[Integer, SlurmCredentials]()
+
+  def put(cuid: Integer, credentials: SlurmCredentials): Unit = byCuid.put(cuid, credentials)
+  def get(cuid: Integer): Option[SlurmCredentials] = Option(byCuid.get(cuid))
+  def remove(cuid: Integer): Unit = byCuid.remove(cuid)
+}
 
 object SlurmJobRequest {
 
@@ -102,11 +150,12 @@ object SlurmUnitAddress {
   * slurmrestd's job endpoints. `send` is a constructor parameter so the spec can answer with the
   * bodies slurmrestd really returned, without a socket.
   *
-  * Authentication is the socket itself: rest_auth/local reads the peer's credentials off it and
-  * requires slurmrestd's own uid, so the job runs as that uid and no token is sent.
+  * Without credentials, authentication is the socket itself: rest_auth/local reads the peer's
+  * credentials off it and requires slurmrestd's own uid, so the job runs as that uid. With them,
+  * rest_auth/jwt authenticates the headers and the job runs as their user.
   */
 class SlurmRestClient(
-    send: (String, String, Option[String]) => UnixSocketHttpResponse,
+    send: (String, String, Option[String], Seq[(String, String)]) => UnixSocketHttpResponse,
     apiVersion: String
 ) {
   private val logger = LoggerFactory.getLogger(classOf[SlurmRestClient])
@@ -116,10 +165,11 @@ class SlurmRestClient(
   private def exchange(
       method: String,
       path: String,
-      body: Option[String]
+      body: Option[String],
+      credentials: Option[SlurmCredentials]
   ): UnixSocketHttpResponse =
     try {
-      send(method, path, body)
+      send(method, path, body, credentials.fold(Seq.empty[(String, String)])(_.headers))
     } catch {
       // The detail goes to the log only: it names a host path no user needs to see.
       case e: IOException =>
@@ -127,16 +177,28 @@ class SlurmRestClient(
         throw SlurmRequestFailure("Slurm cannot be reached right now.", 503)
     }
 
-  private def failOnRejectedConnection(response: UnixSocketHttpResponse): Unit =
+  private def failOnRejectedConnection(response: UnixSocketHttpResponse): Unit = {
     if (response.status == 401) {
       logger.error(
         "slurmrestd rejected this service. With rest_auth/local, this process must run as " +
           "slurmrestd's uid (workflowComputingUnitManager.slurm.runAsUser in the chart), and " +
           "slurmrestd must run on the host rather than in a container of its own: from there " +
-          "it cannot see this process's pid, and refuses it whatever the uid."
+          "it cannot see this process's pid, and refuses it whatever the uid. With " +
+          "rest_auth/jwt, a request without a user name and token is refused."
       )
-      throw SlurmRequestFailure("Slurm rejected this deployment's connection.", 503)
+      throw SlurmRequestFailure(
+        "Slurm rejected this deployment's connection. If it uses tokens, provide a user name " +
+          "and token.",
+        503
+      )
     }
+    // slurmrestd passes a token through unchecked. It is slurmctld that refuses a bad or expired
+    // one, so this arrives as an error on the request rather than as a 401.
+    val refused = Try(Json.parse(response.body)).toOption.toSeq
+      .flatMap(slurmErrors)
+      .exists(_._1 == SlurmErrno.AuthenticationError)
+    if (refused) throw SlurmTokenRejected()
+  }
 
   private def slurmErrors(body: JsValue): Seq[(Int, String)] =
     (body \ "errors").asOpt[Seq[JsObject]].getOrElse(Seq.empty).map { error =>
@@ -147,9 +209,9 @@ class SlurmRestClient(
     }
 
   /** Submits the body as it is and returns the job id. Nothing from the body reaches a message. */
-  def submitJob(body: JsObject): Long = {
+  def submitJob(body: JsObject, credentials: Option[SlurmCredentials] = None): Long = {
     val response =
-      exchange("POST", s"/slurm/$apiVersion/job/submit", Some(Json.stringify(body)))
+      exchange("POST", s"/slurm/$apiVersion/job/submit", Some(Json.stringify(body)), credentials)
     failOnRejectedConnection(response)
     val parsed = Try(Json.parse(response.body)).toOption
     val jobId = parsed.flatMap(json => (json \ "job_id").asOpt[Long])
@@ -161,11 +223,12 @@ class SlurmRestClient(
   }
 
   /** Never throws: one unit's job being unreadable must not fail a listing of every unit. */
-  def lookupJob(jobId: Long): SlurmJobLookup =
+  def lookupJob(jobId: Long, credentials: Option[SlurmCredentials] = None): SlurmJobLookup =
     try {
-      interpretLookup(exchange("GET", jobUrl(jobId), None))
+      interpretLookup(exchange("GET", jobUrl(jobId), None, credentials))
     } catch {
       case e: SlurmRequestFailure => SlurmJobUnavailable(e.getMessage)
+      case _: SlurmTokenRejected  => SlurmTokenUnusable
     }
 
   private def interpretLookup(response: UnixSocketHttpResponse): SlurmJobLookup = {
@@ -199,9 +262,14 @@ class SlurmRestClient(
     )
   }
 
-  /** Succeeds if the job is gone afterwards, including when it already was. */
-  def cancelJob(jobId: Long): Unit = {
-    val response = exchange("DELETE", jobUrl(jobId), None)
+  /**
+    * Succeeds if the job is gone afterwards, including when it already was.
+    *
+    * The credentials must be those the job was submitted with. On Slurm 24.11.5, cancelling
+    * another user's job through slurmrestd leaves slurmctld unresponsive to every user.
+    */
+  def cancelJob(jobId: Long, credentials: Option[SlurmCredentials] = None): Unit = {
+    val response = exchange("DELETE", jobUrl(jobId), None, credentials)
     failOnRejectedConnection(response)
     val parsed = Try(Json.parse(response.body)).toOption
     // Newer API versions answer 200 and list a per-job error under "status"; older ones use the
@@ -228,6 +296,7 @@ class SlurmRestClient(
 }
 
 private object SlurmErrno {
+  val AuthenticationError = 1007
   val InvalidJobId = 2017
   val JobAlreadyCompleting = 2021
   val JobAlreadyOver: Set[Int] = Set(InvalidJobId, JobAlreadyCompleting)

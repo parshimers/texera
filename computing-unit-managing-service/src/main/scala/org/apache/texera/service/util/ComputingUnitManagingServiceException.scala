@@ -44,6 +44,16 @@ final case class InsufficientComputingUnitQuota(maxNumberOfComputingUnit: Int)
 final case class SlurmRequestFailure(message: String, status: Int)
     extends ComputingUnitManagingServiceException(message, status)
 
+// Neither repeats what was entered: it may be a working token with a typo elsewhere.
+final case class InvalidSlurmCredentials(problem: String)
+    extends ComputingUnitManagingServiceException(problem, 400)
+
+final case class SlurmTokenRejected()
+    extends ComputingUnitManagingServiceException(
+      "Slurm rejected the user name and token. The token may have expired.",
+      400
+    )
+
 // The job JSON is the administrator's to fix, and the deployment cannot create units until they do
 final case class InvalidSlurmJobJson(problem: String)
     extends ComputingUnitManagingServiceException(

@@ -42,7 +42,12 @@ final case class UnixSocketHttpResponse(status: Int, body: String)
 class UnixSocketHttpClient(socketPath: Path, timeout: Duration) {
 
   /** @throws IOException when the socket cannot be reached, or no complete response arrives. */
-  def send(method: String, path: String, body: Option[String]): UnixSocketHttpResponse = {
+  def send(
+      method: String,
+      path: String,
+      body: Option[String],
+      headers: Seq[(String, String)] = Seq.empty
+  ): UnixSocketHttpResponse = {
     val deadline = System.nanoTime() + timeout.toNanos
     val channel = SocketChannel.open(StandardProtocolFamily.UNIX)
     try {
@@ -50,19 +55,25 @@ class UnixSocketHttpClient(socketPath: Path, timeout: Duration) {
       channel.configureBlocking(false)
       val selector = Selector.open()
       try {
-        write(channel, selector, encodeRequest(method, path, body), deadline)
+        write(channel, selector, encodeRequest(method, path, body, headers), deadline)
         read(channel, selector, deadline)
       } finally selector.close()
     } finally channel.close()
   }
 
-  private def encodeRequest(method: String, path: String, body: Option[String]): ByteBuffer = {
+  private def encodeRequest(
+      method: String,
+      path: String,
+      body: Option[String],
+      headers: Seq[(String, String)]
+  ): ByteBuffer = {
     val payload = body.map(_.getBytes(UTF_8)).getOrElse(Array.emptyByteArray)
     val contentHeaders = body.fold("") { _ =>
       s"Content-Type: application/json\r\nContent-Length: ${payload.length}\r\n"
     }
+    val extraHeaders = headers.map { case (name, value) => s"$name: $value\r\n" }.mkString
     val head = s"$method $path HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n" +
-      s"Connection: close\r\n$contentHeaders\r\n"
+      s"Connection: close\r\n$extraHeaders$contentHeaders\r\n"
     ByteBuffer.wrap(head.getBytes(ISO_8859_1) ++ payload)
   }
 

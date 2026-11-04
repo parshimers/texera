@@ -35,7 +35,7 @@ class SlurmRestClientSpec extends AnyFlatSpec with Matchers {
   ): (SlurmRestClient, () => List[Request]) = {
     var requests = List.empty[Request]
     val client = new SlurmRestClient(
-      (method, path, body) => {
+      (method, path, body, _) => {
         requests = requests :+ ((method, path, body))
         answer
       },
@@ -315,5 +315,96 @@ class SlurmRestClientSpec extends AnyFlatSpec with Matchers {
   "SlurmUnitAddress.resolve" should "substitute the node into the template" in {
     SlurmUnitAddress.resolve("{node}:8085", "node-1") shouldBe "node-1:8085"
     SlurmUnitAddress.resolve("{node}.hpc.example.edu:9000", "n2") shouldBe "n2.hpc.example.edu:9000"
+  }
+
+  private def credentials(userName: String = "alice", token: String = "aaa.bbb.ccc") =
+    SlurmCredentials.parse(Some(userName), Some(token))
+
+  private val tokenRefused = UnixSocketHttpResponse(
+    511,
+    """{"errors":[{"error_number":1007,"error":"Protocol authentication error"}]}"""
+  )
+
+  private def recording(answer: UnixSocketHttpResponse) = {
+    var seen = List.empty[Seq[(String, String)]]
+    val client = new SlurmRestClient(
+      (_, _, _, headers) => {
+        seen = seen :+ headers
+        answer
+      },
+      "v0.0.42"
+    )
+    (client, () => seen)
+  }
+
+  "SlurmCredentials.parse" should "mean no credentials when both are blank" in {
+    SlurmCredentials.parse(None, None) shouldBe None
+    SlurmCredentials.parse(Some("  "), Some("")) shouldBe None
+  }
+
+  it should "require both" in {
+    an[InvalidSlurmCredentials] should be thrownBy SlurmCredentials.parse(Some("alice"), None)
+    an[InvalidSlurmCredentials] should be thrownBy SlurmCredentials.parse(None, Some("a.b.c"))
+  }
+
+  // Both go verbatim into headers of a hand-written HTTP request.
+  it should "refuse anything that could add a header or smuggle a request" in {
+    Seq(
+      ("alice\r\nX-Injected: 1", "a.b.c"),
+      ("alice", "a.b.c\r\nX-Injected: 1"),
+      ("alice\nX-Injected: 1", "a.b.c"),
+      ("al ice", "a.b.c"),
+      ("alice", "a b c")
+    ).foreach {
+      case (userName, token) =>
+        an[InvalidSlurmCredentials] should be thrownBy
+          SlurmCredentials.parse(Some(userName), Some(token))
+    }
+  }
+
+  it should "not repeat what was entered when refusing it" in {
+    val secret = "not a token"
+    val thrown = the[InvalidSlurmCredentials] thrownBy
+      SlurmCredentials.parse(Some("alice"), Some(secret))
+    thrown.getMessage should not include secret
+  }
+
+  it should "keep the token out of its string form" in {
+    credentials().get.toString should not include "aaa.bbb.ccc"
+  }
+
+  "the client" should "send credentials on every kind of request" in {
+    val expected = Seq("X-SLURM-USER-NAME" -> "alice", "X-SLURM-USER-TOKEN" -> "aaa.bbb.ccc")
+    val (client, seen) = recording(UnixSocketHttpResponse(200, """{"job_id":1,"status":[]}"""))
+    client.submitJob(Json.obj("job" -> Json.obj()), credentials())
+    client.lookupJob(1, credentials())
+    client.cancelJob(1, credentials())
+    seen() shouldBe Seq(expected, expected, expected)
+  }
+
+  it should "send no headers without credentials" in {
+    val (client, seen) = recording(UnixSocketHttpResponse(200, """{"job_id":1,"status":[]}"""))
+    client.submitJob(Json.obj("job" -> Json.obj()))
+    client.lookupJob(1)
+    client.cancelJob(1)
+    seen().flatten shouldBe empty
+  }
+
+  // Real answers: slurmrestd passes the token through, and slurmctld refuses it.
+  it should "report a refused token on submit, as what it is" in {
+    val (client, _) = recording(tokenRefused)
+    a[SlurmTokenRejected] should be thrownBy
+      client.submitJob(Json.obj("job" -> Json.obj()), credentials())
+  }
+
+  it should "report a refused token on cancel, as what it is" in {
+    val (client, _) = recording(tokenRefused)
+    a[SlurmTokenRejected] should be thrownBy client.cancelJob(1, credentials())
+  }
+
+  // Reading this as a gone job would retire a unit whose job is still running.
+  it should "not take a refused token to mean the job is gone" in {
+    val (client, _) = recording(tokenRefused)
+    client.lookupJob(1, credentials()) shouldBe SlurmTokenUnusable
   }
 }

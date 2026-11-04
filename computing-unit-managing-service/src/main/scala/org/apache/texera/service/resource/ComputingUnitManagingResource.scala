@@ -67,6 +67,8 @@ import org.apache.texera.service.util.{
   ComputingUnitManagingServiceException,
   InsufficientComputingUnitQuota,
   KubernetesClient,
+  SlurmCredentialStore,
+  SlurmCredentials,
   SlurmJobRequest,
   SlurmRestClient
 }
@@ -469,8 +471,14 @@ object ComputingUnitManagingResource {
       shmSize: String,
       uri: Option[String] = None,
       /** A curated image to start this unit from, instead of the deployment's own. */
-      iid: Option[Int] = None
-  )
+      iid: Option[Int] = None,
+      /** A Slurm unit's identity, when slurmrestd uses rest_auth/jwt. Never stored or logged. */
+      slurmUserName: Option[String] = None,
+      slurmUserToken: Option[String] = None
+  ) {
+    override def toString: String =
+      s"WorkflowComputingUnitCreationParams($name, $unitType)"
+  }
 
   case class WorkflowComputingUnitResourceLimit(
       cpuLimit: String,
@@ -683,6 +691,13 @@ class ComputingUnitManagingResource(
         throw new ForbiddenException(s"Unsupported computing-unit type: ${param.unitType}")
     }
 
+    val slurmCredentials =
+      if (cuType == WorkflowComputingUnitTypeEnum.slurm) {
+        SlurmCredentials.parse(param.slurmUserName, param.slurmUserToken)
+      } else {
+        None
+      }
+
     // Resolved before anything is written. Starting from an image that is not ready would
     // leave a computing-unit row behind that can never run.
     val curatedImage: Option[String] = param.iid.map { iid =>
@@ -833,11 +848,16 @@ class ComputingUnitManagingResource(
               EnvironmentalVariable.ENV_CU_ID -> cuid,
               EnvironmentalVariable.ENV_USER_JWT_TOKEN -> userToken
             )
-          )
+          ),
+          slurmCredentials
         )
+        slurmCredentials.foreach(SlurmCredentialStore.put(cuid, _))
         insertedUnit.setResource(
           Json.stringify(
-            Json.parse(insertedUnit.getResource).as[JsObject] ++ Json.obj("slurmJobId" -> jobId)
+            Json.parse(insertedUnit.getResource).as[JsObject] ++ Json.obj("slurmJobId" -> jobId) ++
+              (if (slurmCredentials.isDefined)
+                 Json.obj(ComputingUnitHelpers.SlurmUsesTokenField -> true)
+               else Json.obj())
           )
         )
         wcDao.update(insertedUnit)
@@ -1030,8 +1050,15 @@ class ComputingUnitManagingResource(
       if (unit.getType == WorkflowComputingUnitTypeEnum.kubernetes) {
         KubernetesClient.deletePod(cuid)
       }
-      if (unit.getType == WorkflowComputingUnitTypeEnum.slurm) {
-        ComputingUnitHelpers.slurmJobId(unit).foreach(slurm.cancelJob)
+      if (
+        unit.getType == WorkflowComputingUnitTypeEnum.slurm &&
+        unit.getTerminateTime == null &&
+        !ComputingUnitHelpers.cancelSlurmJob(unit, slurm)
+      ) {
+        logger.warn(
+          s"Terminating computing unit cuid=$cuid without cancelling its Slurm job, whose token " +
+            s"is unusable: ${ComputingUnitHelpers.slurmJobId(unit).mkString}"
+        )
       }
 
       val terminationReason = WorkflowComputingUnitTerminationReasonEnum.USER_REQUESTED
@@ -1047,6 +1074,7 @@ class ComputingUnitManagingResource(
       )
       Option.when(notifyOwner)(unit)
     }
+    SlurmCredentialStore.remove(cuid)
     // After the commit, so an owner never hears of a termination that rolled back.
     unitToNotifyOwnerOf.foreach { unit =>
       try {

@@ -317,7 +317,9 @@ workflowComputingUnitManager:
     # slurmrestd's rest_auth/local accepts only the uid it runs as, and jobs run as that uid, so
     # this is the uid of the Slurm user computing units run as. It also refuses a peer whose pid it
     # cannot see, so slurmrestd has to run on the host itself and not in a container of its own.
-    # On rootless k3s this uid is remapped on its way to the host: see README.md.
+    # On rootless k3s this uid is remapped on its way to the host: see README.md. With rest_auth/jwt
+    # none of this applies: each user provides a token when creating a unit, and it is not in this
+    # chart. See "Using each user's Slurm token instead" in README.md.
     runAsUser: 1001
     runAsGroup: 1001
     # The data_parser version in slurmrestd's URLs: see `slurmrestd -d list`.

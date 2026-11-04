@@ -211,6 +211,10 @@ object ComputingUnitHelpers {
 
   private val SlurmUnavailableReason =
     "The state of the computing unit cannot be determined because Slurm cannot be reached."
+  private val SlurmTokenUnusableReason =
+    "Slurm no longer accepts this computing unit's token, or the manager lost it when it " +
+      "restarted, so the unit's state cannot be determined. Its job may still be running. " +
+      "Terminating the unit cannot cancel the job: use scancel, or let it reach its time limit."
   private val SlurmJobGoneReason =
     "The computing unit's Slurm job no longer exists. Please recreate the unit."
   private val SlurmOutOfMemoryReason =
@@ -257,6 +261,7 @@ object ComputingUnitHelpers {
       case None                         => (Pending, None)
       case Some(SlurmJobGone)           => (Failed, Some(SlurmJobGoneReason))
       case Some(SlurmJobUnavailable(_)) => (Unknown, Some(SlurmUnavailableReason))
+      case Some(SlurmTokenUnusable)     => (Unknown, Some(SlurmTokenUnusableReason))
       case Some(SlurmJobFound(job)) =>
         val ended = SlurmEndedReasons.collectFirst {
           case (state, reason) if job.states(state) => reason
@@ -282,6 +287,54 @@ object ComputingUnitHelpers {
   private def isSlurm(unit: WorkflowComputingUnit): Boolean =
     unit.getType == WorkflowComputingUnitTypeEnum.slurm
 
+  /** Marks a unit submitted with a user's token, so that losing the token can be told from never
+    * having had one: such a unit must never fall back to asking without it.
+    */
+  val SlurmUsesTokenField = "slurmUsesToken"
+
+  private def usesSlurmToken(unit: WorkflowComputingUnit): Boolean =
+    Option(unit.getResource).exists { resource =>
+      Try(Json.parse(resource)).toOption
+        .flatMap(json => (json \ SlurmUsesTokenField).asOpt[Boolean])
+        .contains(true)
+    }
+
+  private def lookupSlurmJob(
+      unit: WorkflowComputingUnit,
+      jobId: Long,
+      client: SlurmRestClient
+  ): SlurmJobLookup =
+    if (usesSlurmToken(unit)) {
+      SlurmCredentialStore
+        .get(unit.getCuid)
+        .fold[SlurmJobLookup](SlurmTokenUnusable)(c => client.lookupJob(jobId, Some(c)))
+    } else {
+      client.lookupJob(jobId)
+    }
+
+  /**
+    * Cancels the unit's job, using only the token that job was submitted with.
+    *
+    * @return false if the token is gone or refused. No retry can change that, so the caller should
+    *         not hold the unit up over it. The job runs on until it ends by itself.
+    */
+  def cancelSlurmJob(unit: WorkflowComputingUnit, client: SlurmRestClient): Boolean =
+    slurmJobId(unit).forall { jobId =>
+      if (usesSlurmToken(unit)) {
+        SlurmCredentialStore.get(unit.getCuid).exists { credentials =>
+          try {
+            client.cancelJob(jobId, Some(credentials))
+            true
+          } catch {
+            case _: SlurmTokenRejected => false
+          }
+        }
+      } else {
+        client.cancelJob(jobId)
+        true
+      }
+    }
+
   /**
     * One lookup per Slurm unit, keyed by cuid. Per unit because slurmrestd's bulk listing returns
     * every job on the cluster, which on a shared one is far more than a user's handful of units.
@@ -296,7 +349,9 @@ object ComputingUnitHelpers {
     else {
       val client = slurm
       slurmUnits.map { unit =>
-        unit.getCuid -> slurmJobId(unit).map(client.lookupJob).getOrElse(SlurmJobGone)
+        unit.getCuid -> slurmJobId(unit)
+          .map(lookupSlurmJob(unit, _, client))
+          .getOrElse(SlurmJobGone)
       }.toMap
     }
   }
@@ -379,7 +434,7 @@ object ComputingUnitHelpers {
     val holderJobs = slurmJobsFor(holders, slurm)
     holders.foreach { holder =>
       holderJobs.get(holder.getCuid) match {
-        case Some(SlurmJobUnavailable(_))                                                     =>
+        case Some(SlurmJobUnavailable(_)) | Some(SlurmTokenUnusable)                          =>
         case Some(SlurmJobFound(job)) if slurmAddress(job, addressTemplate).contains(address) =>
         case _                                                                                =>
           // Its owner may be offline, leaving nothing to poll that row, so nothing else would.
@@ -423,6 +478,7 @@ object ComputingUnitHelpers {
             .execute()
           unit.setTerminateTime(now)
           unit.setTerminationReason(reason)
+          SlurmCredentialStore.remove(unit.getCuid)
           false
         case Some(SlurmJobFound(job)) if unit.getTerminateTime == null =>
           val address = slurmAddress(job, addressTemplate).getOrElse("")

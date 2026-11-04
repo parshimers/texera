@@ -68,3 +68,8 @@ export interface ClusterCapacity {
   memory: ResourceCapacity;
   gpu: ResourceCapacity;
 }
+
+export interface SlurmCredentials {
+  userName: string;
+  token: string;
+}

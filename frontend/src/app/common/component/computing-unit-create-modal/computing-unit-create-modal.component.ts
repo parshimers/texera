@@ -97,6 +97,8 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
   showAdvancedSettings = false;
 
   newComputingUnitName: string = "";
+  slurmUserName: string = "";
+  slurmUserToken: string = "";
   selectedMemory: string = "";
   selectedCpu: string = "";
   selectedGpu: string = "0"; // Default to no GPU
@@ -296,6 +298,13 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
       return;
     }
 
+    const slurmUserName = this.slurmUserName.trim();
+    const slurmUserToken = this.slurmUserToken.trim();
+    if (this.selectedComputingUnitType === "slurm" && !slurmUserName !== !slurmUserToken) {
+      this.notificationService.error("Provide both a Slurm user name and a token, or neither");
+      return;
+    }
+
     const request = {
       type: this.selectedComputingUnitType,
       name: this.newComputingUnitName,
@@ -307,6 +316,10 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
       localUri: this.localComputingUnitUri,
       // Left out for the deployment's own image, so the request carries no image at all.
       imageId: this.selectedImageId === DEPLOYMENT_IMAGE ? undefined : this.selectedImageId,
+      slurmCredentials:
+        this.selectedComputingUnitType === "slurm" && slurmUserToken
+          ? { userName: slurmUserName, token: slurmUserToken }
+          : undefined,
     };
 
     this.computingUnitActionsService
@@ -314,6 +327,7 @@ export class ComputingUnitCreateModalComponent implements OnInit, OnChanges {
       .pipe(untilDestroyed(this))
       .subscribe({
         next: (unit: DashboardWorkflowComputingUnit) => {
+          this.slurmUserToken = "";
           this.notificationService.success("Successfully created the new compute unit");
           this.unitCreated.emit(unit);
         },

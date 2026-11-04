@@ -35,9 +35,12 @@ import org.apache.texera.service.resource.ComputingUnitManagingResource.{
 }
 import org.apache.texera.service.util.{
   InsufficientComputingUnitQuota,
+  InvalidSlurmCredentials,
   InvalidSlurmJobJson,
+  SlurmCredentialStore,
   SlurmRequestFailure,
   SlurmRestClient,
+  SlurmTokenRejected,
   UnixSocketHttpResponse
 }
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, LoneElement}
@@ -77,6 +80,7 @@ class SlurmComputingUnitSpec
   /** Scripted slurmrestd. `submitted` holds what each submission really put on the wire. */
   private class FakeSlurm {
     val requests: ListBuffer[(String, String)] = ListBuffer.empty
+    val headersSent: ListBuffer[(String, String, Map[String, String])] = ListBuffer.empty
     val submitted: ListBuffer[JsObject] = ListBuffer.empty
     var nextJobId = 100L
     var submit: () => UnixSocketHttpResponse = () => {
@@ -90,8 +94,9 @@ class SlurmComputingUnitSpec
       () => UnixSocketHttpResponse(200, """{"status":[],"errors":[],"warnings":[]}""")
 
     val client = new SlurmRestClient(
-      (method, path, body) => {
+      (method, path, body, headers) => {
         requests += ((method, path))
+        headersSent += ((method, path.split("/").last, headers.toMap))
         method match {
           case "POST" =>
             submitted += Json.parse(body.get).as[JsObject]
@@ -132,6 +137,19 @@ class SlurmComputingUnitSpec
 
   private def params(name: String = "hpc") =
     WorkflowComputingUnitCreationParams(name, "slurm", "NaN", "NaN", "NaN", "NaN", "NaN")
+
+  private def jwtParams(userName: String = "alice", token: String = "alice.jwt.token") =
+    params().copy(slurmUserName = Some(userName), slurmUserToken = Some(token))
+
+  private val tokenRefused = UnixSocketHttpResponse(
+    511,
+    """{"errors":[{"error_number":1007,"error":"Protocol authentication error"}]}"""
+  )
+
+  private def tokensSentFor(method: String): Seq[String] =
+    slurm.headersSent.collect {
+      case (`method`, _, headers) => headers.getOrElse("X-SLURM-USER-TOKEN", "(none)")
+    }.toSeq
 
   private def dao = new WorkflowComputingUnitDao(getDSLContext.configuration())
 
@@ -541,5 +559,120 @@ class SlurmComputingUnitSpec
     slurm.lookup = () => jobGone
     new AdminComputingUnitResource(slurm.client).listAllComputingUnits(admin) shouldBe empty
     stored(created).getTerminateTime should not be null
+  }
+
+  "a unit created with a user name and token" should "submit its job as that user" in {
+    resource().createWorkflowComputingUnit(jwtParams(), owner)
+    val (_, _, headers) = slurm.headersSent.head
+    headers shouldBe Map(
+      "X-SLURM-USER-NAME" -> "alice",
+      "X-SLURM-USER-TOKEN" -> "alice.jwt.token"
+    )
+  }
+
+  it should "keep the token out of the job, the database and the response" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    Json.stringify(slurm.submitted.head) should not include "alice.jwt.token"
+    Json.stringify(slurm.submitted.head) should not include "X-SLURM"
+    stored(created).getResource should not include "alice.jwt.token"
+    stored(created).getResource should not include "alice"
+    created.toString should not include "alice.jwt.token"
+    jwtParams().toString should not include "alice.jwt.token"
+  }
+
+  it should "send nothing when no credentials are given" in {
+    resource().createWorkflowComputingUnit(params(), owner)
+    slurm.headersSent.flatMap(_._3) shouldBe empty
+  }
+
+  it should "create nothing when the credentials are malformed" in {
+    an[InvalidSlurmCredentials] should be thrownBy
+      resource().createWorkflowComputingUnit(jwtParams(token = "a.b\r\nX-Injected: 1"), owner)
+    slurm.requests shouldBe empty
+    dao.findAll() shouldBe empty
+  }
+
+  it should "create nothing when Slurm refuses the token" in {
+    slurm.submit = () => tokenRefused
+    a[SlurmTokenRejected] should be thrownBy
+      resource().createWorkflowComputingUnit(jwtParams(), owner)
+    dao.findAll() shouldBe empty
+  }
+
+  // Cancelling another user's job through slurmrestd wedges slurmctld on 24.11.5.
+  it should "use each unit's own token, even when another user's is at hand" in {
+    val alice = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    val bob = resource().createWorkflowComputingUnit(jwtParams("bob", "bob.jwt.token"), stranger)
+    slurm.headersSent.clear()
+
+    resource().terminateComputingUnit(alice.computingUnit.getCuid, admin)
+    tokensSentFor("DELETE") shouldBe Seq("alice.jwt.token")
+
+    slurm.headersSent.clear()
+    resource().terminateComputingUnit(bob.computingUnit.getCuid, stranger)
+    tokensSentFor("DELETE") shouldBe Seq("bob.jwt.token")
+  }
+
+  "a unit whose token was lost in a restart" should "be Unknown, saying why, and stay" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    SlurmCredentialStore.remove(created.computingUnit.getCuid)
+    slurm.requests.clear()
+
+    val listed = resource().listComputingUnits(owner)
+    listed.map(_.status) shouldBe List("Unknown")
+    listed.head.statusReason.get should include("cannot cancel the job")
+    stored(created).getTerminateTime shouldBe null
+  }
+
+  // Asking without a token would look like a rejected connection to a rest_auth/jwt slurmrestd,
+  // and to a rest_auth/local one it would act as a different user.
+  it should "not ask Slurm anything" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    SlurmCredentialStore.remove(created.computingUnit.getCuid)
+    slurm.requests.clear()
+
+    resource().listComputingUnits(owner)
+    resource().terminateComputingUnit(created.computingUnit.getCuid, owner)
+    slurm.requests shouldBe empty
+  }
+
+  it should "still be possible to terminate, or it would count against the quota forever" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    SlurmCredentialStore.remove(created.computingUnit.getCuid)
+
+    resource().terminateComputingUnit(created.computingUnit.getCuid, owner).getStatus shouldBe 200
+    stored(created).getTerminateTime should not be null
+  }
+
+  "a unit whose token Slurm stopped accepting" should "be Unknown rather than gone" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    slurm.lookup = () => tokenRefused
+
+    resource().listComputingUnits(owner).map(_.status) shouldBe List("Unknown")
+    stored(created).getTerminateTime shouldBe null
+  }
+
+  it should "still be possible to terminate" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    slurm.cancel = () => tokenRefused
+
+    resource().terminateComputingUnit(created.computingUnit.getCuid, owner).getStatus shouldBe 200
+    stored(created).getTerminateTime should not be null
+  }
+
+  "terminating a unit" should "forget its token" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    val cuid = created.computingUnit.getCuid
+    SlurmCredentialStore.get(cuid) should not be empty
+    resource().terminateComputingUnit(cuid, owner)
+    SlurmCredentialStore.get(cuid) shouldBe empty
+  }
+
+  "a unit whose job is gone" should "have its token forgotten" in {
+    val created = resource().createWorkflowComputingUnit(jwtParams(), owner)
+    val cuid = created.computingUnit.getCuid
+    slurm.lookup = () => jobGone
+    resource().listComputingUnits(owner)
+    SlurmCredentialStore.get(cuid) shouldBe empty
   }
 }

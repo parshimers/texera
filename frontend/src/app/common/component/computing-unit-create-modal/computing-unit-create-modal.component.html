@@ -231,6 +231,25 @@
             [(ngModel)]="newComputingUnitName"
             class="unit-name-input" />
         </div>
+        <div class="select-unit name-field">
+          <span>Slurm User Name</span>
+          <input
+            nz-input
+            autocomplete="off"
+            placeholder="Only if your cluster uses Slurm tokens"
+            [(ngModel)]="slurmUserName"
+            class="slurm-user-name-input" />
+        </div>
+        <div class="select-unit name-field">
+          <span>Slurm Token</span>
+          <input
+            nz-input
+            type="password"
+            autocomplete="new-password"
+            placeholder="From scontrol token"
+            [(ngModel)]="slurmUserToken"
+            class="slurm-user-token-input" />
+        </div>
         <nz-alert
           class="slurm-hint"
           nzType="info"

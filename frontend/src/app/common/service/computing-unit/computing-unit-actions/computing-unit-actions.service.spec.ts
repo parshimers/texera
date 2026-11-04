@@ -90,10 +90,17 @@ describe("ComputingUnitActionsService", () => {
       expect(computingUnitService.createLocalComputingUnit).not.toHaveBeenCalled();
     });
 
+    it("passes a slurm request's credentials along", () => {
+      const slurmCredentials = { userName: "alice", token: "a.b.c" };
+      service.create({ ...baseRequest, type: "slurm", slurmCredentials });
+
+      expect(computingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("unit", slurmCredentials);
+    });
+
     it("routes a slurm request to createSlurmComputingUnit with only the name", () => {
       service.create({ ...baseRequest, type: "slurm" });
 
-      expect(computingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("unit");
+      expect(computingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("unit", undefined);
       expect(computingUnitService.createKubernetesBasedComputingUnit).not.toHaveBeenCalled();
       expect(computingUnitService.createLocalComputingUnit).not.toHaveBeenCalled();
     });
@@ -135,6 +142,16 @@ describe("ComputingUnitActionsService", () => {
 
       expect(notificationService.error).toHaveBeenCalledWith("Invalid computing unit.");
       expect(modalService.confirm).not.toHaveBeenCalled();
+    });
+
+    it("warns before terminating a slurm unit whose status says its job would outlive it", () => {
+      service.confirmAndTerminate(1, {
+        ...unit({ uri: "", type: "slurm" }),
+        status: "Unknown",
+        statusReason: "Terminating the unit cannot cancel the job",
+      });
+
+      expect(modalService.confirm.mock.calls[0][0].nzContent).toContain("cannot cancel the job");
     });
 
     it("still lets a slurm unit be terminated while it queues with no uri", () => {

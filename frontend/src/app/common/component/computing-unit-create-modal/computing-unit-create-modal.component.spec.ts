@@ -239,6 +239,56 @@ describe("ComputingUnitCreateModalComponent", () => {
     expect(visibleSpy).toHaveBeenCalledWith(false);
   });
 
+  describe("slurm credentials", () => {
+    beforeEach(() => {
+      fixture.detectChanges();
+      component.selectedComputingUnitType = "slurm";
+      component.newComputingUnitName = "hpc";
+    });
+
+    it("sends both when both are given", () => {
+      component.slurmUserName = " alice ";
+      component.slurmUserToken = " a.b.c ";
+
+      component.startComputingUnit();
+
+      expect(mockComputingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("hpc", {
+        userName: "alice",
+        token: "a.b.c",
+      });
+    });
+
+    it("sends none when neither is given", () => {
+      component.startComputingUnit();
+
+      expect(mockComputingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("hpc", undefined);
+    });
+
+    it.each([
+      ["alice", ""],
+      ["", "a.b.c"],
+    ])("refuses one without the other (%s, %s)", (userName, token) => {
+      component.slurmUserName = userName;
+      component.slurmUserToken = token;
+
+      component.startComputingUnit();
+
+      expect(mockNotificationService.error).toHaveBeenCalledWith(
+        "Provide both a Slurm user name and a token, or neither"
+      );
+      expect(mockComputingUnitService.createSlurmComputingUnit).not.toHaveBeenCalled();
+    });
+
+    it("does not keep the token once the unit is created", () => {
+      component.slurmUserName = "alice";
+      component.slurmUserToken = "a.b.c";
+
+      component.startComputingUnit();
+
+      expect(component.slurmUserToken).toBe("");
+    });
+  });
+
   it("rejects a slurm create with an empty name", () => {
     fixture.detectChanges();
     component.selectedComputingUnitType = "slurm";
@@ -271,7 +321,7 @@ describe("ComputingUnitCreateModalComponent", () => {
     component.newComputingUnitName = "hpc";
     component.handleAddComputeUnitModalOk();
 
-    expect(mockComputingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("hpc");
+    expect(mockComputingUnitService.createSlurmComputingUnit).toHaveBeenCalledWith("hpc", undefined);
     expect(mockNotificationService.success).toHaveBeenCalled();
     expect(created).toHaveBeenCalledWith(createdUnit);
   });

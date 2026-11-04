@@ -23,7 +23,7 @@ import { Observable } from "rxjs";
 import { NzModalService } from "ng-zorro-antd/modal";
 import { ShareAccessComponent } from "../../../../dashboard/component/user/share-access/share-access.component";
 import { WorkflowComputingUnitManagingService } from "../workflow-computing-unit/workflow-computing-unit-managing.service";
-import { DashboardWorkflowComputingUnit, WorkflowComputingUnitType } from "../../../type/workflow-computing-unit";
+import { DashboardWorkflowComputingUnit, SlurmCredentials, WorkflowComputingUnitType } from "../../../type/workflow-computing-unit";
 import { NotificationService } from "../../notification/notification.service";
 import { unitTypeMessageTemplate } from "../../../util/computing-unit.util";
 import { ComputingUnitStatusService } from "../computing-unit-status/computing-unit-status.service";
@@ -40,6 +40,7 @@ export interface StartComputingUnitRequest {
   localUri: string;
   /** A curated image to start from. Absent means the deployment's own image. */
   imageId?: number;
+  slurmCredentials?: SlurmCredentials;
 }
 
 @Injectable({
@@ -87,7 +88,7 @@ export class ComputingUnitActionsService {
     }
 
     if (request.type === "slurm") {
-      return this.computingUnitService.createSlurmComputingUnit(request.name);
+      return this.computingUnitService.createSlurmComputingUnit(request.name, request.slurmCredentials);
     }
 
     throw new Error("Unsupported computing unit type");
@@ -105,6 +106,11 @@ export class ComputingUnitActionsService {
     const unitName = escapeHtml(unit.computingUnit.name);
     const unitType = unit?.computingUnit.type || "kubernetes"; // fallback
     const templates = unitTypeMessageTemplate[unitType];
+    // A Slurm unit can be Unknown because its token is unusable, and then its job outlives this.
+    const statusWarning =
+      unitType === "slurm" && unit.status === "Unknown" && unit.statusReason
+        ? `<p>${escapeHtml(unit.statusReason)}</p>`
+        : "";
 
     // Show confirmation modal
     this.modalService.confirm({
@@ -113,6 +119,7 @@ export class ComputingUnitActionsService {
         ? `
       <p>Are you sure you want to terminate <strong>${unitName}</strong>?</p>
       ${templates.terminateWarning}
+      ${statusWarning}
     `
         : `
       <p>Are you sure you want to disconnect from <strong>${unitName}</strong>?</p>

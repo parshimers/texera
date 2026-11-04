@@ -24,6 +24,7 @@ import { AppSettings } from "../../../app-setting";
 import {
   ClusterCapacity,
   DashboardWorkflowComputingUnit,
+  SlurmCredentials,
   WorkflowComputingUnit,
   WorkflowComputingUnitResourceLimit,
   WorkflowComputingUnitType,
@@ -93,11 +94,24 @@ export class WorkflowComputingUnitManagingService {
     shmSize: string,
     uri: string,
     unitType: WorkflowComputingUnitType,
-    iid?: number
+    iid?: number,
+    slurmCredentials?: SlurmCredentials
   ): Observable<DashboardWorkflowComputingUnit> {
     // iid is left out when no curated image was chosen, so the unit runs the deployment's
     // own image exactly as before.
-    const body = { name, cpuLimit, memoryLimit, gpuLimit, jvmMemorySize, shmSize, uri, unitType, iid };
+    const body = {
+      name,
+      cpuLimit,
+      memoryLimit,
+      gpuLimit,
+      jvmMemorySize,
+      shmSize,
+      uri,
+      unitType,
+      iid,
+      slurmUserName: slurmCredentials?.userName,
+      slurmUserToken: slurmCredentials?.token,
+    };
 
     return this.http
       .post<DashboardWorkflowComputingUnit>(`${AppSettings.getApiEndpoint()}/${COMPUTING_UNIT_CREATE_URL}`, body)
@@ -153,10 +167,14 @@ export class WorkflowComputingUnitManagingService {
    * its resources, so a name is all there is to choose.
    *
    * @param name The name of the computing unit.
+   * @param credentials The user's own identity, when slurmrestd uses rest_auth/jwt.
    * @returns An Observable of the created WorkflowComputingUnit.
    */
-  public createSlurmComputingUnit(name: string): Observable<DashboardWorkflowComputingUnit> {
-    return this.createComputingUnit(name, "NaN", "NaN", "NaN", "NaN", "NaN", "", "slurm");
+  public createSlurmComputingUnit(
+    name: string,
+    credentials?: SlurmCredentials
+  ): Observable<DashboardWorkflowComputingUnit> {
+    return this.createComputingUnit(name, "NaN", "NaN", "NaN", "NaN", "NaN", "", "slurm", undefined, credentials);
   }
 
   /**

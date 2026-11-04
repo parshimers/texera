@@ -79,6 +79,54 @@ sed 's/192.0.2.10/<host address>/' bin/k8s/values-slurm-rootless.yaml > slurm.ya
 bin/k8s/install.sh -f slurm.yaml
 ```
 
+### Using each user's Slurm token instead
+
+If your cluster uses `rest_auth/jwt`, users can give a Slurm user name and token when they create a
+unit, and its job runs as that user. Nothing in the chart changes. Leaving both blank uses
+`rest_auth/local` as above.
+
+In `slurm.conf`, with a key of 32 random bytes that only `SlurmUser` can read (Debian packages the
+plugin separately, as `slurm-wlm-jwt-plugin`):
+
+```
+AuthAltTypes=auth/jwt
+AuthAltParameters=jwt_key=/var/lib/slurm/ctld/jwt_hs256.key
+```
+
+Then run slurmrestd with only that plugin:
+
+```bash
+SLURM_JWT=daemon slurmrestd -a rest_auth/jwt -s openapi/slurmctld unix:/srv/slurmrestd/slurmrestd.socket
+```
+
+Do not also load `rest_auth/local`. It decides alone when both are loaded: a matching uid is accepted
+with any token at all, even an invalid one, and the job runs as slurmrestd's uid, while any other uid
+is refused even with a valid token.
+
+With `rest_auth/jwt`, `runAsUser` no longer has to match slurmrestd's uid, and slurmrestd may run in
+a container of its own, as long as the manager can open the socket. The user must exist on the Slurm
+nodes and be able to read what `script` runs. A user gets a token with `scontrol token
+lifespan=<seconds>`.
+
+The token goes to the manager and stays in its memory. It is not written to the database, the job, or
+any log, which has consequences:
+
+- **A restart or an expired token.** When the manager restarts, or Slurm stops accepting a token, the
+  unit's status becomes `Unknown` and it says why. The job keeps running and the gateway keeps routing
+  to it, but the manager can no longer read or cancel it. Terminating the unit only stops tracking it,
+  so the job runs on until someone uses `scancel` or it reaches `time_limit`. Make the token's lifespan
+  at least `time_limit`, and expect upgrades that restart the manager to do this to every such unit.
+- **One replica.** Tokens are not shared between pods, so keep `workflowComputingUnitManager.numOfPods`
+  at 1.
+- **An occupied address.** Until such a unit is terminated it keeps its address, because its job may
+  still be there. Other units on that address stay `Pending`.
+- **Changing modes.** A unit created without a token cannot be read or terminated by a slurmrestd that
+  only has `rest_auth/jwt`. Terminate those units before switching.
+
+The manager only ever uses a unit's own token on that unit's job. On Slurm 24.11.5, cancelling another
+user's job through slurmrestd took 10 seconds to fail and then left slurmctld unresponsive to everyone,
+so take care with any other client of this slurmrestd.
+
 ### Values
 
 | Value (under `workflowComputingUnitManager.slurm`) | Meaning |
@@ -163,11 +211,15 @@ in `job.environment`, and set `storage.s3.endpoint` to an address that works eve
 A Slurm unit does not have the isolation of a pod. Before offering this to mutually untrusting users,
 consider that:
 
-- Every unit runs as one Slurm user. A user's UDF can act on other units' jobs (`scancel`), read their
-  files on shared storage, and, on a node they share, read their environment.
-- That environment holds the database and object-store credentials and the owner's token. It is also
-  stored in slurmctld's `StateSaveLocation` while the job exists, and in the accounting database if
-  `AccountingStoreFlags` includes `job_env`.
+- With `rest_auth/local`, every unit runs as one Slurm user. A user's UDF can act on other units' jobs
+  (`scancel`), read their files on shared storage, and, on a node they share, read their environment.
+  With tokens each unit runs as its own user, which separates units from each other, but see below.
+- That environment holds the database and object-store credentials, the owner's token, and
+  `AUTH_JWT_SECRET`, the key that signs every user's Texera token. Anyone who can read it can forge a
+  token for any user, including an administrator. With tokens, that means every user who creates a unit,
+  through their own Slurm account, without needing a UDF. It is also stored in slurmctld's
+  `StateSaveLocation` while the job exists, and in the accounting database if `AccountingStoreFlags`
+  includes `job_env`.
 - A unit trusts the identity headers the gateway sets, and a pod is only reachable from inside the
   cluster. Port 8085 on a Slurm node must likewise be firewalled so that only the gateway reaches it,
   or anyone who can reach it can act as any user.

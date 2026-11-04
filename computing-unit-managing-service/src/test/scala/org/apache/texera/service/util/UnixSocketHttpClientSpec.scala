@@ -30,7 +30,7 @@ import java.nio.channels.{ServerSocketChannel, SocketChannel}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import java.time.Duration
-import java.util.concurrent.{CompletableFuture, CountDownLatch}
+import java.util.concurrent.{CompletableFuture, CountDownLatch, TimeUnit}
 
 class UnixSocketHttpClientSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
 
@@ -102,7 +102,14 @@ class UnixSocketHttpClientSpec extends AnyFlatSpec with Matchers with BeforeAndA
     finally server.close()
   }
 
-  "send" should "write an HTTP/1.1 request and read the status and body" in {
+  "send" should "write the headers it is given" in {
+    withServer(Seq("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")) { request =>
+      client().send("GET", "/p", None, Seq("X-SLURM-USER-NAME" -> "alice"))
+      request.get(5, TimeUnit.SECONDS) should include("\r\nX-SLURM-USER-NAME: alice\r\n")
+    }
+  }
+
+  it should "write an HTTP/1.1 request and read the status and body" in {
     val payload = """{"job_id":7}"""
     withServer(
       Seq(s"HTTP/1.1 200 OK\r\nContent-Length: ${payload.length}\r\n\r\n$payload")

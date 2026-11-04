@@ -1008,7 +1008,10 @@ class ComputingUnitHelpersSpec
   it should "treat a unit with no recorded job as gone, as nothing of it can be running" in {
     ComputingUnitHelpers.slurmJobsFor(
       Seq(slurmUnit("{}")),
-      new SlurmRestClient((_, _, _) => throw new AssertionError("no request expected"), "v0.0.42")
+      new SlurmRestClient(
+        (_, _, _, _) => throw new AssertionError("no request expected"),
+        "v0.0.42"
+      )
     ) shouldBe Map(Integer.valueOf(5) -> SlurmJobGone)
   }
 }
